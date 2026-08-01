@@ -1,22 +1,49 @@
 /**
- * Conflux — OpenAI API key rotation proxy
+ * Conflux — Multi-provider API key rotation proxy
  *
- * Sits between Codex and OpenAI, rotating through multiple API keys
- * so you never have to manually swap them when a budget runs out.
+ * Routes incoming client requests to provider target endpoints based on TOML configuration,
+ * rotating API keys per provider pool, and dispatching requests through universal proxies.
  */
 
-import { loadKeys, getKeyStates } from "./src/keys";
+import { loadConfig } from "./src/config";
+import { initKeys, getKeyStates } from "./src/keys";
 import { handleRequest } from "./src/proxy";
 
-// ── Load config ──────────────────────────────────────────────────
-loadKeys();
+// ── Load Config ──────────────────────────────────────────────────
+let config = await loadConfig();
+initKeys(config);
 
-const PORT = Number(process.env.PORT) || 4010;
+// Watch config file for changes using Bun.file
+const configPath = config.configPath;
+let lastModified = (await Bun.file(configPath).exists()) ? Bun.file(configPath).lastModified : 0;
+
+setInterval(() => {
+  void (async () => {
+    try {
+      const file = Bun.file(configPath);
+      if (await file.exists()) {
+        const modified = file.lastModified;
+        if (modified > lastModified) {
+          lastModified = modified;
+          console.log(`\n🔄 Reloading configuration from ${configPath}...`);
+          const newConfig = await loadConfig(configPath);
+          initKeys(newConfig);
+          config = newConfig;
+          console.log("✅ Configuration reloaded successfully.");
+        }
+      }
+    } catch (err: unknown) {
+      console.error("❌ Error reloading configuration:", err);
+    }
+  })();
+}, 2000);
+
+const PORT = config.port;
 
 // ── Server ───────────────────────────────────────────────────────
-const server = Bun.serve({
+Bun.serve({
   port: PORT,
-  idleTimeout: 255, // seconds — max Bun allows; LLM streams can be long
+  idleTimeout: 255, // seconds — max Bun allows for long LLM streams
 
   async fetch(req) {
     const url = new URL(req.url);
@@ -24,19 +51,21 @@ const server = Bun.serve({
     // Health / status endpoint
     if (url.pathname === "/_status") {
       return new Response(
-        JSON.stringify({ ok: true, keys: getKeyStates() }, null, 2),
+        JSON.stringify({ ok: true, status: getKeyStates() }, null, 2),
         { headers: { "content-type": "application/json" } },
       );
     }
 
-    // Everything else → proxy to upstream
+    // Proxy request to upstream
     const start = performance.now();
     const res = await handleRequest(req);
     const ms = (performance.now() - start).toFixed(1);
 
-    console.log(
-      `${req.method} ${url.pathname} → ${res.status} (${ms}ms)`,
-    );
+    const keyNum = res.headers.get("x-conflux-key-number");
+    const proxyNum = res.headers.get("x-conflux-proxy-number");
+    const keyDetails = keyNum ? ` [Key #${keyNum}, Proxy #${proxyNum ?? "none"}]` : "";
+
+    console.log(`${req.method} ${url.pathname} → ${res.status} (${ms}ms)${keyDetails}`);
 
     return res;
   },
@@ -44,7 +73,7 @@ const server = Bun.serve({
   error(err) {
     console.error("Unhandled server error:", err);
     return new Response(
-      JSON.stringify({ error: "Internal proxy error" }),
+      JSON.stringify({ error: "Internal proxy error", detail: String(err) }),
       { status: 500, headers: { "content-type": "application/json" } },
     );
   },
@@ -52,9 +81,8 @@ const server = Bun.serve({
 
 console.log(`
 ┌──────────────────────────────────────────────┐
-│  🌀 Conflux proxy listening on :${PORT}         │
-│                                              │
-│  Point Codex to: http://localhost:${PORT}       │
-│  Status:         http://localhost:${PORT}/_status│
+│  🌀 Conflux Multi-Provider Proxy listening   │
+│  Port:    http://localhost:${PORT}             │
+│  Status:  http://localhost:${PORT}/_status      │
 └──────────────────────────────────────────────┘
 `);

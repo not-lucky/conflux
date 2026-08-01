@@ -1,85 +1,93 @@
 # Conflux
 
-API key rotation proxy for LLM APIs (OpenAI, Anthropic, Gemini, Azure, etc.). Sits between your AI client and the API, automatically rotating through multiple keys so you don't have to manually swap them when a budget runs out.
+Multi-provider API key rotation proxy for LLM APIs (OpenAI, Anthropic, Gemini, etc.). Sits between your AI clients and upstream providers, routing requests based on client keys, rotating through provider key pools, and forwarding requests through universal proxies.
 
-## Setup
+## Quick Start
 
 ```bash
 # Install dependencies
 bun install
 
-# Copy and fill in your keys
-cp .env.example .env
-# Edit .env → paste your API keys comma-separated
-# Set UPSTREAM_URL (e.g. https://api.anthropic.com for Anthropic)
-
-# Run
+# Run (loads config.toml by default)
 bun run dev
+
+# Build JavaScript bundle to ./dist
+bun run build
+
+# Build standalone executable binary to ./dist/conflux
+bun run build:compile
 ```
 
-## Configuration (`.env`)
+## Configuration (`config.toml`)
 
-| Variable       | Default                    | Description                                                            |
-| -------------- | -------------------------- | ---------------------------------------------------------------------- |
-| `API_KEYS`     | —                          | Comma-separated API keys (or `key|proxy_url` format per key)           |
-| `API_PROXIES`  | —                          | Optional comma-separated proxies matched 1:1 with `API_KEYS`           |
-| `UPSTREAM_URL`  | `https://api.openai.com`   | Upstream API base URL (e.g. `https://api.anthropic.com`)               |
-| `CLIENT_KEY`   | `dummy`                    | Optional custom key/UUID/SHA256 string to replace in incoming requests  |
-| `PORT`         | `4010`                     | Port the proxy listens on                                              |
+Conflux is configured using `config.toml`. Specify provider sections, base URLs, key pools, and universal proxies:
 
-### Multi-Provider Support
+```toml
+# Server Port
+port = 4010
 
-Conflux performs direct, exact string substitution for your client key (UUID, SHA256, `dummy`, or custom `CLIENT_KEY`):
-* Wherever the client API key string appears in **any header** or **any query parameter**, Conflux replaces it with the active rotated key from `.env`.
-* No pattern matching or hardcoded header names — works out of the box with OpenAI (`Authorization: Bearer`), Anthropic (`x-api-key`), Azure (`api-key`), Google Gemini (`x-goog-api-key` / `?key=`), and any custom API header.
+# Max consecutive 429/402 errors before an API key is marked exhausted (default: 5)
+max_consecutive_errors = 5
 
-### Per-Key Proxies (Avoid IP Rate Limits)
+# Cooldown duration after key exhaustion (e.g. "5h", "30m", "300s"; default: "5h")
+cooldown = "5h"
 
-To prevent providers with IP-based rate limits from throttling all keys together, each key can route through a separate upstream proxy.
+# Optional: Rotate proxy mapping between keys every N requests (e.g. shift proxy assignment by 1 after 10 requests)
+rotate_proxies_interval = 10
 
-You can configure proxies in two ways:
+# Universal proxies applied round-robin across all provider key requests
+proxies = [
+  "http://proxy1.example.com:8080",
+  "socks5://proxy2.example.com:1080"
+]
 
-1. **Inline in `API_KEYS`**:
-   ```bash
-   API_KEYS=sk-key1|http://127.0.0.1:8080,sk-key2|socks5://127.0.0.1:1080,sk-key3
-   ```
+# Section 1: Route client key "dummy1" to OpenAI
+[providers.openai_dev]
+conflux_api_key = "dummy1"
+base_url = "https://api.openai.com"
+api_keys = [
+  "sk-proj-dev-key1",
+  "sk-proj-dev-key2|http://inline-proxy:8080"
+]
+rotate_proxies_interval = 10
 
-2. **Using `API_PROXIES`**:
-   ```bash
-   API_KEYS=sk-key1,sk-key2,sk-key3
-   API_PROXIES=http://proxy1:8080,http://proxy2:8080,http://proxy3:8080
-   ```
+# Section 2: Route client key "dummy2" to Anthropic
+[providers.anthropic_prod]
+conflux_api_key = "dummy2"
+base_url = "https://api.anthropic.com"
+api_keys = [
+  "sk-ant-api03-prod1",
+  "sk-ant-api03-prod2"
+]
 
-## Usage with Codex
-
-Point Codex at the proxy instead of OpenAI directly:
-
-```bash
-# In your Codex config, set the base URL to:
-export OPENAI_BASE_URL=http://localhost:4010
-# Leave the API key as any dummy value — the proxy injects the real one
-export OPENAI_API_KEY=dummy
+# Default section for requests without a specific matching key
+[providers.default]
+base_url = "https://api.openai.com"
+api_keys = [
+  "sk-proj-default-key1"
+]
 ```
 
-## How it works
+## How It Works
 
-1. Receives any request from the client
-2. Picks the next available API key (round-robin)
-3. Forwards the request to the upstream OpenAI API with the selected key
-4. Passes the response back to the client as-is (supports both JSON and streaming/SSE)
-5. If a key errors out 5 times in a row (`429` / `402`), it's marked exhausted for 5 hours. A successful request resets its error counter.
-6. Every request/response is logged to `./logs/trace/<timestamp>/` for debugging
+1. **Client Key Extraction**: Conflux inspects incoming requests for client keys in `Authorization: Bearer <key>`, `x-api-key`, `api-key`, or query parameters (`?key=`).
+2. **Provider Selection**: Matches the client key (e.g. `dummy1` or `dummy2`) to the provider section in `config.toml`.
+3. **Key Rotation & Proxy Assignment**: Selects the next healthy key in the section's key pool (round-robin) and applies a proxy. If `rotate_proxies_interval` is configured (e.g. `10`), key-to-proxy mapping shifts deterministically every *N* requests (key 1 initially maps to proxy 1, key 2 to proxy 2; after 10 requests, key 1 shifts to proxy 2, etc.).
+4. **Key Replacement**: Replaces the client key with the real provider API key across headers and query parameters.
+5. **Upstream Request**: Forwards the request to the provider's `base_url`.
+6. **Error Tracking & Cooldown**: Automatically tracks 429/402 errors per key. When a key reaches the consecutive error threshold (configurable via `max_consecutive_errors`, default: 5), it enters a cooldown window (configurable via `cooldown`, default: 5 hours). Both options can be configured globally or per-provider pool.
+7. **Hot Reloading**: Editing `config.toml` updates configuration live without restarting the server.
 
 ## Endpoints
 
-- `/_status` — JSON health check showing key states
-- Everything else → proxied to upstream
+- `GET /_status` — JSON status check displaying universal proxies and real-time provider key states.
+- `/*` — Proxied to matching upstream provider base URL.
 
-## Logs
+## Trace Logs
 
-Each request creates a directory under `./logs/trace/` containing:
+Request and response traces are saved to `./logs/trace/<timestamp>/`:
+- `request.json` — Method, URL, headers, body
+- `response.json` — Status, headers, body (non-streaming)
+- `response.stream` — Raw SSE chunks (streaming)
+- `meta.json` — Timing, key used (`keyUsed`), key number (`keyNumber`), active proxy (`proxy`), proxy number (`proxyNumber`), streaming flag, status code
 
-- `request.json` — method, URL, headers, body
-- `response.json` — status, headers, body (non-streaming)
-- `response.stream` — raw SSE chunks (streaming)
-- `meta.json` — timing, key used, streaming flag
