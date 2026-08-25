@@ -92,6 +92,43 @@ func (h *Health) SetLastError(url, msg string) {
 	h.lastError[url] = msg
 }
 
+// Trip manually trips a proxy's circuit breaker until the given cooldown elapses
+// from now, and records the supplied last-error message. Used by the
+// dashboard's "trip proxy" action. A zero cooldown trips it indefinitely (a
+// future RecordSuccess or Reset clears it).
+func (h *Health) Trip(url, lastError string, cooldown time.Duration) {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	if url == "" {
+		return
+	}
+	if cooldown > 0 {
+		h.deadUntil[url] = h.clock.Now().Add(cooldown)
+	} else {
+		// Use a far-future deadline so isHealthyLocked reports false until Reset
+		// or RecordSuccess is called.
+		h.deadUntil[url] = h.clock.Now().Add(100 * 365 * 24 * time.Hour)
+	}
+	if lastError != "" {
+		h.lastError[url] = lastError
+	}
+}
+
+// Reset clears a proxy's circuit breaker: consecutive-error counter, trip
+// deadline, and last-error message. It is the manual "re-enable proxy" action
+// backing the dashboard. It mirrors what RecordSuccess does, but is callable
+// without an actual upstream request.
+func (h *Health) Reset(url string) {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	if url == "" {
+		return
+	}
+	delete(h.errs, url)
+	delete(h.deadUntil, url)
+	delete(h.lastError, url)
+}
+
 // isHealthyLocked reports whether a URL is past its trip window.
 func (h *Health) isHealthyLocked(url string, now time.Time) bool {
 	du, ok := h.deadUntil[url]

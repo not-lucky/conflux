@@ -1,0 +1,38 @@
+{{define "content-traces"}}
+<div id="traces-region">
+  <div class="page-head">
+    <div>
+      <h2>Request traces</h2>
+      <div class="sub">On-disk traces under {{.Root}} · level {{.Level}} · max_dirs {{.MaxDirs}}</div>
+    </div>
+    <div class="actions">
+      {{if .PrevBefore}}<a class="btn sm" href="/_dashboard/traces?before={{.PrevBefore}}">← newer</a>{{end}}
+      <span class="faint mono">{{.Count}} shown</span>
+      {{if .NextBefore}}<a class="btn sm" href="/_dashboard/traces?before={{.NextBefore}}">older →</a>{{end}}
+    </div>
+  </div>
+
+  {{if .Traces}}
+  <div class="panel">
+    <ul class="trace-list">
+      {{range .Traces}}
+      <li>
+        <span class="ts">{{.Timestamp}}</span>
+        <span class="pill {{if eq .Outcome "error"}}err{{else}}ok{{end}}">{{.Outcome}}</span>
+        <span class="id">{{.ID}}</span>
+        <span class="mono faint">{{.Provider}}</span>
+        <span class="mono faint">{{.Model}}</span>
+        {{if .DurationMs}}<span class="faint mono">{{.DurationMs}}ms</span>{{end}}
+        {{if .Attempt}}<span class="faint mono">attempt {{.Attempt}}</span>{{end}}
+        <span style="margin-left:auto">
+          <a class="btn sm" href="/_dashboard/trace?dir={{.Dir}}">view</a>
+        </span>
+      </li>
+      {{end}}
+    </ul>
+  </div>
+  {{else}}
+  <div class="panel"><div class="empty">{{if .Disabled}}Tracing is off. Set logging.level to full or errors_only.{{else}}No trace directories found.{{end}}</div></div>
+  {{end}}
+</div>
+{{end}}

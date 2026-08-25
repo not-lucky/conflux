@@ -1,0 +1,23 @@
+{{define "login"}}
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Conflux Dashboard · Sign in</title>
+  <link rel="stylesheet" href="/_dashboard/assets/dashboard.css">
+</head>
+<body>
+  <div class="login-wrap">
+    <form class="login" method="POST" action="/_dashboard/login">
+      <h1>{{svg "logo"}} Conflux</h1>
+      <p>Sign in with the gateway admin token to manage pools, proxies, breakers, and reload config.</p>
+      {{if .Error}}<div class="err">{{.Error}}</div>{{end}}
+      <label for="token">Admin token</label>
+      <input id="token" name="token" type="password" autocomplete="current-password" autofocus required>
+      <button class="btn primary" type="submit">Sign in</button>
+    </form>
+  </div>
+</body>
+</html>
+{{end}}

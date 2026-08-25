@@ -3,4 +3,9 @@ config.toml
 /conflux.exe
 *.test
 *.out
-./config.yaml
+config.yaml
+# runtime artifacts: on-disk traces and the persisted state file
+/logs/
+state.yaml
+state.json
+/_test-*

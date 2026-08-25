@@ -29,6 +29,7 @@ between that call and the upstream provider.
   - [Status (`/_status`)](#status-_status)
   - [Request tracing](#request-tracing)
   - [Diagnostic headers](#diagnostic-headers)
+  - [Dashboard (`/_dashboard`)](#dashboard-_dashboard)
 - [How routing, keys, and proxies work](#how-routing-keys-and-proxies-work)
 - [Project structure](#project-structure)
 - [Development](#development)
@@ -89,6 +90,7 @@ state file on restart so a restart does not reset your pools.
 | **Persistence** | State file (YAML or JSON), debounced flush, immediate flush on retirement, SHA256 key hashing, cross-restart restore |
 | **Metrics** | Prometheus exposition at `/metrics` (counters, gauges, histogram) |
 | **Status** | `/_status` JSON: version, uptime, proxy health, key gauges, provider detail |
+| **Dashboard** | Built-in HTMX console at `/_dashboard`: live overview, key/proxy/breaker control, model table, trace viewer, and hot config reload |
 | **Tracing** | Per-request on-disk traces with redaction and retention pruning; `full`, `errors_only`, `off` |
 | **Redaction** | Secrets masked in traces, metrics, and status; proxy URLs stripped of credentials |
 | **Auth** | Client key from `Authorization: Bearer` > `x-api-key` > `api-key`; global validation |
@@ -368,6 +370,7 @@ Reserved paths are intercepted before proxying; everything else is forwarded.
 | GET | `/v1/models/:id`, `/models/:id` | Look up one model (exact, prefix, or catch-all match). |
 | GET | `/_status` | JSON snapshot: version, uptime, proxy health, key gauges, provider detail. |
 | GET | `/metrics` | Prometheus text exposition. |
+| Any | `/_dashboard/*` | Management console (gated by `server.admin_token`); see [Dashboard](#dashboard). |
 
 ### `GET /v1/models`
 
@@ -550,6 +553,40 @@ When `server.expose_diagnostics` is true, successful responses carry:
 | `X-Conflux-Attempt` | Number of attempts taken. |
 | `X-Conflux-Error` | Terminal downstream error message (when set). |
 
+### Dashboard (`/_dashboard`)
+
+Conflux ships a built-in management console at `/_dashboard/`, rendered with
+[HTMX](https://htmx.org) and Go's `html/template` over the live runtime. It is
+a single embedded page (no build step, no external CDN — CSS, JS, and a
+vendored `htmx.min.js` are served from the binary) for operating the gateway
+without a separate process.
+
+The dashboard is **disabled** when `server.admin_token` is empty; set it to a
+secret to enable it. Sign in with the admin token; the session is an
+`HttpOnly`, `SameSite=Strict` cookie scoped to `/_dashboard`.
+
+It reads live state through the same swappable snapshot the server uses, so a
+hot reload is reflected immediately, and writes go straight to the live key
+pools, proxy health, and breakers.
+
+| Section | What you can do |
+| --- | --- |
+| **Overview** | Live uptime, request/error counts, per-provider key-state bars, top error categories. Auto-refreshes every 5s. |
+| **Providers** | Resolved per-provider policy (cooldown, retries, breakers, fallbacks, models). |
+| **Keys** | Per-provider keys with masked values, state pills, and `reset` / `retire` actions. |
+| **Proxies** | Egress pool health with `reset` (re-enable) and `trip` (force-offline) actions. |
+| **Breakers** | Per-provider 5xx breakers with `reset` (close) and `force open` actions. |
+| **Models** | The routing table: exact ids and prefix/catch-all patterns. |
+| **Traces** | Browse on-disk request traces; view `request.json`, `response.json`, `meta.json`, and `response.stream` per request. |
+
+The **Reload config** action re-reads `config.yaml`, rebuilds the key pools,
+proxy health, breakers, routing table, forwarder, and validator, and atomically
+swaps them in — so a config change (new key, new model, new cooldown) takes
+effect without restarting the process. In-memory key exhaustion and proxy trips
+carry over across a reload; the metrics registry, tracer, and rate limiter are
+preserved so counters and windows are not reset. A reload that fails config
+validation is rejected and leaves the old runtime serving.
+
 ---
 
 ## How routing, keys, and proxies work
@@ -620,6 +657,8 @@ conflux/
     ├── auth/                # client-key extraction + validation
     ├── config/              # strict YAML load + validation + resolution
     ├── clock/               # clock interface for deterministic tests
+    ├── runtime/             # swappable live snapshot (Store) for hot reload
+    └── dashboard/           # HTMX management console at /_dashboard
     └── version/             # version string (single source of truth)
 ```
 

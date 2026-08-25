@@ -49,3 +49,39 @@ func TestBreakerHalfOpenReopen(t *testing.T) {
 		t.Error("expected reopened after half-open 5xx")
 	}
 }
+
+func TestBreakerForceOpenAndReset(t *testing.T) {
+	clk := &fakeClock{t: time.Unix(0, 0)}
+	b := New(5, 30*time.Second, clk)
+
+	// Reset on a closed breaker is a no-op-ish but must keep it closed.
+	b.Reset()
+	if b.Open() {
+		t.Fatal("Reset on a closed breaker should keep it closed")
+	}
+
+	// ForceOpen opens it even with zero 5xx count.
+	b.ForceOpen(0)
+	if !b.Open() {
+		t.Fatal("ForceOpen should open the breaker")
+	}
+	// After the configured cooldown elapses, it becomes half-open.
+	clk.Add(31 * time.Second)
+	if b.Open() {
+		t.Fatal("breaker should be half-open after configured cooldown")
+	}
+	// ForceOpen with an explicit cooldown is respected.
+	b.ForceOpen(2 * time.Second)
+	if !b.Open() {
+		t.Fatal("ForceOpen with explicit cooldown should open")
+	}
+	clk.Add(1 * time.Second)
+	if !b.Open() {
+		t.Fatal("still within explicit cooldown, should remain open")
+	}
+	// Reset closes it immediately, even mid-cooldown.
+	b.Reset()
+	if b.Open() {
+		t.Fatal("Reset should close the breaker immediately")
+	}
+}

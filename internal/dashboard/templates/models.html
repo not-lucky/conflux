@@ -1,0 +1,44 @@
+{{define "content-models"}}
+<div id="models-region">
+  <div class="page-head">
+    <div>
+      <h2>Models</h2>
+      <div class="sub">Routing table: model id → provider, by exact, prefix, and catch-all rules.</div>
+    </div>
+  </div>
+
+  <div class="grid cols-2">
+    <div class="panel">
+      <div class="panel-head"><h3>{{svg "model"}} Exact models ({{len .Exact}})</h3></div>
+      {{if .Exact}}
+      <table>
+        <thead><tr><th>Model</th><th>Provider</th></tr></thead>
+        <tbody>
+        {{range .Exact}}
+          <tr><td class="mono">{{.ID}}</td><td class="mono">{{.Provider}}</td></tr>
+        {{end}}
+        </tbody>
+      </table>
+      {{else}}<div class="empty">No exact model ids.</div>{{end}}
+    </div>
+
+    <div class="panel">
+      <div class="panel-head"><h3>{{svg "rule"}} Patterns ({{len .Patterns}})</h3></div>
+      {{if .Patterns}}
+      <table>
+        <thead><tr><th>Pattern</th><th>Kind</th><th>Provider</th></tr></thead>
+        <tbody>
+        {{range .Patterns}}
+          <tr>
+            <td class="mono">{{.Literal}}</td>
+            <td><span class="pill muted">{{.Kind}}</span></td>
+            <td class="mono">{{.Provider}}</td>
+          </tr>
+        {{end}}
+        </tbody>
+      </table>
+      {{else}}<div class="empty">No prefix or catch-all patterns.</div>{{end}}
+    </div>
+  </div>
+</div>
+{{end}}

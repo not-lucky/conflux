@@ -242,3 +242,46 @@ func TestInlineProxyCarriedInSelection(t *testing.T) {
 		t.Errorf("select 2 Proxy = %q, want http://inline:8080", s2.Proxy)
 	}
 }
+
+// TestPoolReset verifies the dashboard's per-key Reset action clears
+// consecutive errors, exhaustion, and retirement.
+func TestPoolReset(t *testing.T) {
+	p := New(Spec{
+		Keys:               keys(2),
+		Mode:               "round_robin",
+		ActiveWindow:       2,
+		MaxErrors:          2,
+		Cooldown:           5 * time.Hour,
+		RetireOnExhaustion: false,
+	}, &fakeClock{t: time.Unix(1000, 0)})
+
+	// Exhaust key 1 with two errors.
+	r1 := p.RecordError(1)
+	if r1.Exhausted {
+		t.Fatal("first RecordError should not exhaust yet")
+	}
+	r2 := p.RecordError(1)
+	if !r2.Exhausted {
+		t.Fatal("second RecordError should exhaust key 1")
+	}
+	// Key 1 is exhausted; only key 2 is selectable.
+	for i := 0; i < 4; i++ {
+		s, err := p.Select()
+		if err != nil {
+			t.Fatalf("Select: %v", err)
+		}
+		if s.Key.Value == "A" {
+			t.Fatal("exhausted key A should not be selected")
+		}
+	}
+
+	// Reset re-enables key 1 immediately, even mid-cooldown.
+	p.Reset(1)
+	c := p.Counts()
+	if c.Exhausted != 0 || c.Active != 2 {
+		t.Fatalf("after Reset, counts = %+v, want active=2 exhausted=0", c)
+	}
+
+	// Out-of-range Reset is a no-op.
+	p.Reset(99)
+}

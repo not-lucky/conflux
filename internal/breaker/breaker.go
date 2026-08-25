@@ -63,6 +63,25 @@ func (b *Breaker) On2xx() {
 	b.openUntil = time.Time{}
 }
 
+// Reset closes and resets the breaker immediately, clearing the consecutive-5xx
+// counter and any open deadline. It is the manual "reset breaker" action for
+// the dashboard. It is equivalent to On2xx but named for the operator intent.
+func (b *Breaker) Reset() {
+	b.On2xx()
+}
+
+// ForceOpen opens the breaker for the given cooldown from now, regardless of the
+// consecutive-5xx count. It is the manual "force-open breaker" action for the
+// dashboard. A cooldown of zero uses the breaker's configured cooldown.
+func (b *Breaker) ForceOpen(cooldown time.Duration) {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	if cooldown <= 0 {
+		cooldown = b.cooldown
+	}
+	b.openUntil = b.clock.Now().Add(cooldown)
+}
+
 // Open reports whether the breaker is currently open, in which case 5xx
 // retries are skipped. After the cooldown elapses, the breaker is half-open
 // and Open returns false, letting the next request through.
@@ -80,4 +99,40 @@ func (b *Breaker) Open() bool {
 	// the threshold rather than a stale openUntil.
 	b.openUntil = time.Time{}
 	return false
+}
+
+// BreakerState is a read-only snapshot of the breaker for the dashboard. It
+// is a small export so the dashboard can render threshold, consecutive-5xx
+// count, and the open deadline without exposing mutable internals.
+type BreakerState struct {
+	Open           bool
+	Consecutive5xx int
+	Threshold      int
+	OpenUntil      time.Time // zero when closed
+}
+
+// State returns a read-only snapshot of the breaker. The Open field reflects
+// the same lazy half-open transition as Open, so calling State has the same
+// side effect of clearing a lapsed openUntil.
+func (b *Breaker) State() BreakerState {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	now := b.clock.Now()
+	open := false
+	until := b.openUntil
+	if !b.openUntil.IsZero() {
+		if now.Before(b.openUntil) {
+			open = true
+		} else {
+			// Cooldown elapsed: half-open, clear the stale trip.
+			b.openUntil = time.Time{}
+			until = time.Time{}
+		}
+	}
+	return BreakerState{
+		Open:           open,
+		Consecutive5xx: b.consecutive5xx,
+		Threshold:      b.threshold,
+		OpenUntil:      until,
+	}
 }

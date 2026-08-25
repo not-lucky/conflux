@@ -1,0 +1,57 @@
+{{define "content-keys"}}
+<div id="keys-region">
+  <div class="page-head">
+    <div>
+      <h2>Key pools</h2>
+      <div class="sub">Per-provider keys: health, selection state, and manual control.</div>
+    </div>
+  </div>
+
+  {{range .Providers}}
+  {{$prov := .}}
+  <div class="prov-card" style="margin-bottom:16px">
+    <div class="ph">
+      <span class="name">{{svg "provider"}} {{.Name}} <span class="pill muted">{{.Strategy}}</span></span>
+      <span class="url">{{.BaseURL}}</span>
+    </div>
+    <div class="pb">
+      <table>
+        <thead>
+          <tr>
+            <th>#</th><th>Key</th><th>State</th><th class="num">Errs</th>
+            <th>Proxy</th><th>Since</th><th class="num">Actions</th>
+          </tr>
+        </thead>
+        <tbody>
+        {{range .Keys}}
+          <tr id="key-{{$prov.Name}}-{{.KeyNumber}}">
+            <td class="num mono">{{.KeyNumber}}</td>
+            <td class="mono">{{.Masked}}</td>
+            <td>{{keyStatePill .State}}</td>
+            <td class="num mono">{{.ConsecutiveErrors}}/{{.MaxErrors}}</td>
+            <td class="mono faint">{{if .Proxy}}{{.Proxy}}{{else}}<span class="faint">direct</span>{{end}}</td>
+            <td class="mono faint">{{if .Since}}<span data-epoch="{{.SinceMs}}">{{.Since}}</span>{{else}}—{{end}}</td>
+            <td class="num">
+              <button class="btn sm"
+                      hx-post="/_dashboard/act/keys/reset?provider={{$prov.Name}}&key={{.KeyNumber}}"
+                      hx-target="#keys-region"
+                      hx-swap="outerHTML"
+                      data-toast="key #{{.KeyNumber}} reset">reset</button>
+              <button class="btn sm warn"
+                      hx-post="/_dashboard/act/keys/retire?provider={{$prov.Name}}&key={{.KeyNumber}}"
+                      hx-target="#keys-region"
+                      hx-swap="outerHTML"
+                      data-confirm="Immediately exhaust/retire key #{{.KeyNumber}} for {{$prov.Name}}?"
+                      data-toast="key #{{.KeyNumber}} exhausted">retire</button>
+            </td>
+          </tr>
+        {{end}}
+        </tbody>
+      </table>
+    </div>
+  </div>
+  {{else}}
+  <div class="empty">No providers configured.</div>
+  {{end}}
+</div>
+{{end}}

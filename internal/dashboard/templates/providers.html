@@ -1,0 +1,70 @@
+{{define "content-providers"}}
+<div id="providers-region">
+  <div class="page-head">
+    <div>
+      <h2>Providers</h2>
+      <div class="sub">Resolved upstream configuration, policy, keys, models, and live gauges.</div>
+    </div>
+    <div class="actions">
+      <button class="btn primary sm"
+              hx-post="/_dashboard/act/reload"
+              data-toast="config reloaded"
+              data-confirm="Reload config.yaml and rebuild all pools now?">↻ Reload config</button>
+    </div>
+  </div>
+
+  {{range .Providers}}
+  <div class="prov-card" style="margin-bottom:16px">
+    <div class="ph">
+      <span class="name">{{svg "provider"}} {{.Name}}</span>
+      <span class="url">{{.BaseURL}}</span>
+    </div>
+    <div class="pb">
+      <div class="grid cols-3">
+        <div>
+          <div class="kv">
+            <span class="k">base_url</span><span class="v">{{.BaseURL}}</span>
+            <span class="k">keys</span><span class="v">{{.KeyCount}}</span>
+            <span class="k">strategy</span><span class="v">{{.Strategy}}</span>
+            <span class="k">req/key</span><span class="v">{{.RequestsPerKey}}</span>
+          </div>
+        </div>
+        <div>
+          <div class="kv">
+            <span class="k">max_errors</span><span class="v">{{.MaxErrors}}</span>
+            <span class="k">cooldown</span><span class="v">{{.Cooldown}}</span>
+            <span class="k">retire</span><span class="v">{{.RetireOnExhaustion}}</span>
+            <span class="k">active_window</span><span class="v">{{.ActiveWindow}}</span>
+          </div>
+        </div>
+        <div>
+          <div class="kv">
+            <span class="k">stream_retries</span><span class="v">{{.MaxStreamRetries}}</span>
+            <span class="k">5xx_threshold</span><span class="v">{{.Upstream5xxThreshold}}</span>
+            <span class="k">5xx_cooldown</span><span class="v">{{.Upstream5xxCooldown}}</span>
+            <span class="k">retry_max</span><span class="v">{{.RetryMaxAttempts}}</span>
+          </div>
+        </div>
+      </div>
+      <hr class="soft">
+      <div class="row between">
+        <div>
+          <span class="faint">models:</span>
+          {{range .Models}}<span class="pill muted mono" style="margin-left:6px">{{.}}</span>{{end}}
+        </div>
+        <div class="row gap-s">
+          {{if .FallbackModels}}
+          <span class="faint">fallbacks:</span>
+          {{range .FallbackModels}}<span class="pill standby mono" style="margin-left:6px">{{.}}</span>{{end}}
+          {{else}}
+          <span class="faint">no fallbacks</span>
+          {{end}}
+        </div>
+      </div>
+    </div>
+  </div>
+  {{else}}
+  <div class="empty">No providers configured.</div>
+  {{end}}
+</div>
+{{end}}

@@ -270,3 +270,101 @@ func (r *Registry) Status(version string, detail StatusDetail, proxyHealth map[s
 		Status: detail,
 	}
 }
+
+// Snapshot is a structured copy of all counters, gauges, and histograms at a
+// point in time, used by the dashboard to render charts without parsing the
+// Prometheus exposition. It is safe for concurrent use; the maps are fresh
+// copies.
+type Snapshot struct {
+	UptimeSeconds      int64
+	RequestsTotal      int64
+	RequestsByProvider map[string]map[int]int64            // provider -> status -> count
+	RequestsByModel    map[string]map[string]map[int]int64 // model -> provider -> status -> count
+	ErrorCategories    map[string]map[string]int64         // provider -> category -> count
+	KeysGauge          map[string]map[string]int64         // provider -> state -> count
+	ProxyHealthy       map[string]int64                    // url -> 1/0
+	Histogram          map[string]HistogramSnapshot        // provider -> histogram
+}
+
+// HistogramSnapshot is a copy of one provider's duration histogram.
+type HistogramSnapshot struct {
+	Buckets []float64 // the bucket upper bounds, matching Counts
+	Counts  []int64   // cumulative count per bucket
+	Sum     float64
+	Count   int64
+}
+
+// Snapshot returns a structured copy of the registry's state.
+func (r *Registry) Snapshot() Snapshot {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	r.histMu.Lock()
+	defer r.histMu.Unlock()
+
+	s := Snapshot{
+		UptimeSeconds:      int64(time.Since(r.uptimeStart).Seconds()),
+		RequestsTotal:      r.requestsTotal.Load(),
+		RequestsByProvider: copyIntStatus(r.requestsByProvider),
+		RequestsByModel:    copyModelStatus(r.requestsByModel),
+		ErrorCategories:    copyStringInt(r.errorCategories),
+		KeysGauge:          copyStringInt(r.keysGauge),
+		ProxyHealthy:       copyProxyHealthy(r.proxyHealthy),
+		Histogram:          map[string]HistogramSnapshot{},
+	}
+	for prov, h := range r.hist {
+		counts := make([]int64, len(h.counts))
+		copy(counts, h.counts)
+		s.Histogram[prov] = HistogramSnapshot{
+			Buckets: histBuckets, Counts: counts, Sum: h.sum, Count: h.count,
+		}
+	}
+	return s
+}
+
+func copyIntStatus(m map[string]map[int]int64) map[string]map[int]int64 {
+	out := make(map[string]map[int]int64, len(m))
+	for k, v := range m {
+		inner := make(map[int]int64, len(v))
+		for k2, v2 := range v {
+			inner[k2] = v2
+		}
+		out[k] = inner
+	}
+	return out
+}
+
+func copyModelStatus(m map[string]map[string]map[int]int64) map[string]map[string]map[int]int64 {
+	out := make(map[string]map[string]map[int]int64, len(m))
+	for k, v := range m {
+		m1 := make(map[string]map[int]int64, len(v))
+		for k2, v2 := range v {
+			m2 := make(map[int]int64, len(v2))
+			for k3, v3 := range v2 {
+				m2[k3] = v3
+			}
+			m1[k2] = m2
+		}
+		out[k] = m1
+	}
+	return out
+}
+
+func copyStringInt(m map[string]map[string]int64) map[string]map[string]int64 {
+	out := make(map[string]map[string]int64, len(m))
+	for k, v := range m {
+		inner := make(map[string]int64, len(v))
+		for k2, v2 := range v {
+			inner[k2] = v2
+		}
+		out[k] = inner
+	}
+	return out
+}
+
+func copyProxyHealthy(m map[string]int64) map[string]int64 {
+	out := make(map[string]int64, len(m))
+	for k, v := range m {
+		out[k] = v
+	}
+	return out
+}

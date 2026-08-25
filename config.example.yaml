@@ -277,7 +277,9 @@ providers:
     #   prefix  — "gpt-4*"          matches any id starting with "gpt-4"
     #   catch-all — "*"              matches any unmatched id (see the catchall
     #                               provider below; at most ONE globally)
-    # Rules: no whitespace, no ":"; "*" only as a trailing suffix or standalone.
+    # Rules: no whitespace (":" is allowed, e.g. OpenRouter free-tier suffixes
+    # like "nvidia/nemotron-3.5-lightning:free"); "*" only as a trailing
+    # suffix or standalone.
     # Cross-provider duplicate exact/prefix and multiple catch-alls are errors.
     models:
       - gpt-4o          # exact

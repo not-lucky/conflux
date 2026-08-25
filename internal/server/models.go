@@ -13,7 +13,7 @@ func (s *Server) handleModelsList(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(http.StatusMethodNotAllowed)
 		return
 	}
-	infos := s.Registry.Enumerate()
+	infos := s.liveSnapshot().Registry.Enumerate()
 	data := make([]any, 0, len(infos))
 	for _, mi := range infos {
 		data = append(data, map[string]any{
@@ -40,11 +40,12 @@ func (s *Server) handleModelDetail(w http.ResponseWriter, r *http.Request) {
 		http.NotFound(w, r)
 		return
 	}
-	if !s.Registry.Lookup(id) {
+	reg := s.liveSnapshot().Registry
+	if !reg.Lookup(id) {
 		http.Error(w, `{"error":"model not found"}`, http.StatusNotFound)
 		return
 	}
-	prov, _ := s.Registry.Match(id)
+	prov, _ := reg.Match(id)
 	resp := map[string]any{"id": id, "provider": prov}
 	w.Header().Set("Content-Type", "application/json")
 	enc := json.NewEncoder(w)

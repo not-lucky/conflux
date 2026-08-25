@@ -217,7 +217,6 @@ func TestParseModelErrors(t *testing.T) {
 		{"leading_star", `"*foo"`},
 		{"middle_star", `"a*b"`},
 		{"whitespace", `"a b"`},
-		{"colon", `"a:b"`},
 		{"empty", `""`},
 	}
 	for _, c := range cases {
@@ -233,6 +232,38 @@ providers:
 		if err == nil || !errors.Is(err, ErrInvalidModel) {
 			t.Errorf("case %q: err = %v, want ErrInvalidModel", c.name, err)
 		}
+	}
+}
+
+// TestParseModelAllowsColon verifies that a model id containing ':' parses as
+// an exact match. OpenRouter-style ids such as
+// "nvidia/nemotron-3.5-lightning:free" carry a ':' that must not be rejected
+// or treated as a delimiter.
+func TestParseModelAllowsColon(t *testing.T) {
+	yaml := `
+auth: {client_keys: [sk-1]}
+providers:
+  p:
+    base_url: https://x.com
+    models: ["nvidia/nemotron-3.5-lightning:free"]
+    keys: [{key: k}]
+`
+	cfg, err := parse([]byte(yaml))
+	if err != nil {
+		t.Fatalf("parse: %v", err)
+	}
+	p, ok := cfg.ProviderByName("p")
+	if !ok {
+		t.Fatal("provider p not found")
+	}
+	if len(p.Models) != 1 {
+		t.Fatalf("models = %d, want 1", len(p.Models))
+	}
+	if p.Models[0].Kind != ModelExact {
+		t.Errorf("kind = %v, want ModelExact", p.Models[0].Kind)
+	}
+	if p.Models[0].Literal != "nvidia/nemotron-3.5-lightning:free" {
+		t.Errorf("literal = %q", p.Models[0].Literal)
 	}
 }
 

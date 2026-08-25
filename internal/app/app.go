@@ -14,6 +14,7 @@ import (
 	"errors"
 	"time"
 
+	"github.com/not-lucky/conflux/internal/auth"
 	"github.com/not-lucky/conflux/internal/breaker"
 	"github.com/not-lucky/conflux/internal/clock"
 	"github.com/not-lucky/conflux/internal/config"
@@ -25,6 +26,7 @@ import (
 	"github.com/not-lucky/conflux/internal/proxy"
 	"github.com/not-lucky/conflux/internal/ratelimit"
 	"github.com/not-lucky/conflux/internal/redact"
+	"github.com/not-lucky/conflux/internal/runtime"
 	"github.com/not-lucky/conflux/internal/trace"
 )
 
@@ -40,10 +42,68 @@ type App struct {
 	Tracer    *trace.Tracer
 	Store     *persist.Store
 	Forwarder *forward.Forwarder
+
+	// Live is the swappable runtime snapshot the server and dashboard read
+	// through. It is published on Build and again on a successful Reload so a
+	// hot config swap is visible to in-flight handlers without restarting the
+	// process. The non-swappable observers (Metrics, Tracer, Limiter, Store)
+	// live directly on App and persist across a reload.
+	Live *runtime.Store
 }
 
 // Build assembles the runtime from a resolved config.
 func Build(cfg *config.Config) (*App, error) {
+	clk := clock.RealClock{}
+	pclock := clock.RealClock{}
+
+	reg := metrics.New(time.Now())
+	tr := trace.New("./logs", trace.ParseLevel(cfg.Logging.Level), cfg.Logging.MaxDirs)
+	lim := ratelimit.New(clk)
+
+	store := persist.New("")
+	if cfg.Persistence != nil && cfg.Persistence.Path != "" {
+		store = persist.New(cfg.Persistence.Path)
+	}
+
+	// On a cold start, restore from the persisted state file. On a reload,
+	// the caller supplies the freshest live state instead (see Reload).
+	st, _ := store.Load()
+	rt, err := buildLive(cfg, st, store, reg, clk, pclock)
+	if err != nil {
+		return nil, err
+	}
+
+	app := &App{
+		Config: cfg, Registry: rt.Registry, Health: rt.Health,
+		Pools: rt.Pools, Breakers: rt.Breakers, Limiter: lim,
+		Metrics: reg, Tracer: tr, Store: store,
+		Forwarder: rt.Forwarder, Live: rt.Store,
+	}
+	return app, nil
+}
+
+// builtRuntime is the result of building a fresh Live snapshot: the
+// constituent objects plus the published Store. Callers (Build, Reload) copy
+// the pieces they need onto App fields and hand the Store to the server and
+// dashboard.
+type builtRuntime struct {
+	Registry  *model.Registry
+	Health    *proxy.Health
+	Pools     map[string]*keypool.Pool
+	Breakers  map[string]*breaker.Breaker
+	Forwarder *forward.Forwarder
+	Store     *runtime.Store
+}
+
+// buildLive constructs the swappable runtime from a resolved config and a
+// prior state snapshot, reusing the stable store and metrics so counters and
+// persistence survive a reload. It builds the routing table, per-provider key
+// pools and breakers, the global proxy health, the forwarder with its provider
+// handles, and publishes them all into a fresh runtime.Store. On a reload the
+// priorState is the freshest live state (snapshotted from the old pools), so
+// key exhaustion and proxy trips carry over; on a cold start it is the state
+// loaded from the persisted file (possibly empty).
+func buildLive(cfg *config.Config, priorState persist.State, store *persist.Store, mreg *metrics.Registry, clk, pclock clock.Clock) (*builtRuntime, error) {
 	// Build the model routing table.
 	provModels := make([]model.Provider, 0, len(cfg.Providers))
 	for _, p := range cfg.Providers {
@@ -63,10 +123,6 @@ func Build(cfg *config.Config) (*App, error) {
 		provModels = append(provModels, model.Provider{Name: p.Name, Models: entries})
 	}
 	registry := model.NewRegistry(provModels)
-
-	clk := clock.RealClock{}
-	pclock := clock.RealClock{}
-	lim := ratelimit.New(clk)
 
 	// Build a per-provider key pool and circuit breaker for each provider.
 	pools := map[string]*keypool.Pool{}
@@ -89,33 +145,72 @@ func Build(cfg *config.Config) (*App, error) {
 	}
 
 	health := proxy.NewHealth(pclock)
+	restoreState(cfg, pools, health, priorState)
 
-	reg := metrics.New(time.Now())
-	tr := trace.New("./logs", trace.ParseLevel(cfg.Logging.Level), cfg.Logging.MaxDirs)
-
-	// Persistence: load prior state and restore it into the pools and proxy
-	// health when a persistence path is configured.
-	store := persist.New("")
-	if cfg.Persistence != nil && cfg.Persistence.Path != "" {
-		store = persist.New(cfg.Persistence.Path)
-		st, _ := store.Load()
-		restoreState(cfg, pools, health, st)
-	}
-
-	app := &App{
-		Config: cfg, Registry: registry, Health: health,
-		Pools: pools, Breakers: breakers, Limiter: lim,
-		Metrics: reg, Tracer: tr, Store: store,
-	}
-
-	// Build the forwarder with an HTTP Doer and a provider lookup backed by
-	// the pools.
-	doer := newHTTPDoer()
-	handles := buildHandles(app)
+	handles := buildHandles(cfg, pools, breakers, health, store, mreg)
 	lookup := &mapLookup{handles: handles}
-	app.Forwarder = &forward.Forwarder{Doer: doer, Providers: lookup}
+	fwd := &forward.Forwarder{Doer: newHTTPDoer(), Providers: lookup}
 
-	return app, nil
+	liveStore := &runtime.Store{}
+	liveStore.Store(&runtime.Live{
+		Config:    cfg,
+		Registry:  registry,
+		Forwarder: fwd,
+		Validator: auth.NewValidator(cfg.Auth.ClientKeys),
+		Pools:     pools,
+		Breakers:  breakers,
+		Health:    health,
+		ProxyHealth: func() map[string]metrics.ProxyHealth {
+			return proxyHealthFromEntries(health.Snapshot(cfg.ProxyURLs()))
+		},
+	})
+
+	// Push the initial gauges from the restored state so /metrics is correct
+	// immediately after a (re)build, not only after the first live transition.
+	saver := &stateSaver{cfg: cfg, pools: pools, health: health, store: store, metrics: mreg}
+	saver.pushGauges()
+
+	return &builtRuntime{
+		Registry: registry, Health: health, Pools: pools, Breakers: breakers,
+		Forwarder: fwd, Store: liveStore,
+	}, nil
+}
+
+// Reload re-reads the config at cfgPath, rebuilds the swappable runtime while
+// preserving the current in-memory key/proxy state, and atomically publishes
+// the new Live snapshot. The stable observers (Metrics, Tracer, Limiter,
+// persist Store) are kept, so counters, traces, and rate-limit windows are
+// not reset across a reload. On a config error the old snapshot is left in
+// place and the error is returned unchanged.
+//
+// Reload is safe to call concurrently with request serving: in-flight
+// requests continue against the old Live (its handles keep the old pools
+// alive for GC), and new requests pick up the new Live on their next
+// store.Load().
+func (a *App) Reload(cfgPath string) error {
+	newCfg, err := config.Load(cfgPath)
+	if err != nil {
+		return err
+	}
+	prior := a.Live.Load()
+	var priorState persist.State
+	if prior != nil {
+		priorState = snapshotState(prior.Config, prior.Pools, prior.Health)
+	}
+	rt, err := buildLive(newCfg, priorState, a.Store, a.Metrics, clock.RealClock{}, clock.RealClock{})
+	if err != nil {
+		return err
+	}
+	// Publish the new snapshot, then mirror the new pieces onto App fields so
+	// legacy readers (and tests) that go through App see the refreshed state.
+	a.Live.Store(rt.Store.Load())
+	a.Config = rt.Store.Load().Config
+	a.Registry = rt.Registry
+	a.Health = rt.Health
+	a.Pools = rt.Pools
+	a.Breakers = rt.Breakers
+	a.Forwarder = rt.Forwarder
+	return nil
 }
 
 // ProxyHealthSnapshot returns the health snapshot as a map keyed by the
@@ -123,7 +218,18 @@ func Build(cfg *config.Config) (*App, error) {
 // metrics.ProxyHealth so server stays decoupled from proxy. DeadUntil is
 // converted to a unix-ms pointer, nil when not tripped.
 func (a *App) ProxyHealthSnapshot() map[string]metrics.ProxyHealth {
-	entries := a.Health.Snapshot(a.Config.ProxyURLs())
+	live := a.Live.Load()
+	if live == nil {
+		return nil
+	}
+	entries := live.Health.Snapshot(live.Config.ProxyURLs())
+	return proxyHealthFromEntries(entries)
+}
+
+// proxyHealthFromEntries converts proxy snapshot entries into the
+// /_status ProxyHealth map, shared by the live snapshot and the app-level
+// convenience method.
+func proxyHealthFromEntries(entries []proxy.SnapshotEntry) map[string]metrics.ProxyHealth {
 	out := make(map[string]metrics.ProxyHealth, len(entries))
 	for _, e := range entries {
 		var du *int64
@@ -341,25 +447,28 @@ type providerHandle struct {
 	saver  *stateSaver
 }
 
-// buildHandles constructs one providerHandle per provider at Build time.
-func buildHandles(app *App) map[string]forward.ProviderHandle {
+// buildHandles constructs one providerHandle per provider at (re)build time.
+// It takes the concrete collaborators directly rather than *App so it can run
+// during a Reload against freshly built pools/breakers/health while reusing the
+// stable store and metrics.
+func buildHandles(cfg *config.Config, pools map[string]*keypool.Pool, breakers map[string]*breaker.Breaker, health *proxy.Health, store *persist.Store, mreg *metrics.Registry) map[string]forward.ProviderHandle {
 	saver := &stateSaver{
-		cfg:     app.Config,
-		pools:   app.Pools,
-		health:  app.Health,
-		store:   app.Store,
-		metrics: app.Metrics,
+		cfg:     cfg,
+		pools:   pools,
+		health:  health,
+		store:   store,
+		metrics: mreg,
 	}
-	handles := make(map[string]forward.ProviderHandle, len(app.Config.Providers))
+	handles := make(map[string]forward.ProviderHandle, len(cfg.Providers))
 
 	gpc := &proxy.PoolConfig{
-		URLs: app.Config.Proxies.URLs, RotateInterval: app.Config.Proxies.RotateInterval,
-		MaxErrors: app.Config.Proxies.MaxErrors, Cooldown: app.Config.Proxies.Cooldown,
+		URLs: cfg.Proxies.URLs, RotateInterval: cfg.Proxies.RotateInterval,
+		MaxErrors: cfg.Proxies.MaxErrors, Cooldown: cfg.Proxies.Cooldown,
 	}
 
-	for _, p := range app.Config.Providers {
-		pool := app.Pools[p.Name]
-		brk := app.Breakers[p.Name]
+	for _, p := range cfg.Providers {
+		pool := pools[p.Name]
+		brk := breakers[p.Name]
 
 		aw := p.ActiveWindow
 		if aw == 0 {
@@ -378,7 +487,7 @@ func buildHandles(app *App) map[string]forward.ProviderHandle {
 			name:   p.Name,
 			pool:   pool,
 			brk:    brk,
-			health: app.Health,
+			health: health,
 			ppc:    ppc,
 			gpc:    gpc,
 			policy: forward.ProviderPolicy{

@@ -1,0 +1,114 @@
+{{define "content-overview"}}
+<div id="overview-region"
+     hx-get="/_dashboard/partials/overview"
+     hx-trigger="every 5s"
+     hx-swap="outerHTML">
+  <div class="page-head">
+    <div>
+      <h2>Overview</h2>
+      <div class="sub">Live gateway health · auto-refreshes every 5s</div>
+    </div>
+    <div class="actions">
+      <button class="btn primary sm"
+              hx-post="/_dashboard/act/reload"
+              data-toast="config reloaded"
+              data-confirm="Reload config.yaml and rebuild all pools now?">
+        ↻ Reload config
+      </button>
+    </div>
+  </div>
+
+  <div class="topbar">
+    <div class="item"><span class="dot {{if .Degraded}}warn{{else if .Critical}}err{{end}}"></span> {{if .Critical}}critical{{else if .Degraded}}degraded{{else}}operational{{end}}</div>
+    <div class="sep"></div>
+    <div class="item"><span class="dot"></span> uptime <b>{{.Uptime}}</b></div>
+    <div class="sep"></div>
+    <div class="item">version <b class="mono">{{.Version}}</b></div>
+    <div class="sep"></div>
+    <div class="item">requests <b class="mono">{{.Requests}}</b></div>
+    <div class="sep"></div>
+    <div class="item">errors <b class="mono">{{.Errors}}</b></div>
+    <div class="sep"></div>
+    <div class="item">providers <b class="mono">{{.ProviderCount}}</b></div>
+    <div class="sep"></div>
+    <div class="item">proxies <b class="mono">{{.HealthyProxies}}/{{.ProxyCount}}</b> healthy</div>
+  </div>
+
+  <div class="grid cols-4" style="margin-bottom:16px">
+    <div class="stat">
+      <div class="label">Total requests</div>
+      <div class="value">{{.Requests}}</div>
+      <div class="foot">{{.SuccessRate}}% success</div>
+    </div>
+    <div class="stat">
+      <div class="label">Classified errors</div>
+      <div class="value">{{.Errors}}</div>
+      <div class="foot">{{.ErrorRate}} per req</div>
+    </div>
+    <div class="stat">
+      <div class="label">Keys healthy</div>
+      <div class="value">{{.KeysActive}}/{{.KeysTotal}}</div>
+      <div class="foot">{{.KeysExhausted}} exhausted · {{.KeysRetired}} retired</div>
+    </div>
+    <div class="stat">
+      <div class="label">Proxies healthy</div>
+      <div class="value">{{.HealthyProxies}}/{{.ProxyCount}}</div>
+      <div class="foot">{{.ProxiesTripped}} tripped</div>
+    </div>
+  </div>
+
+  <div class="grid cols-2">
+    <div class="panel">
+      <div class="panel-head"><h3>{{svg "keys"}} Key pool health</h3></div>
+      <div class="panel-body">
+        {{if .Providers}}
+        {{range .Providers}}
+        <div style="margin-bottom:14px">
+          <div class="row between" style="margin-bottom:6px">
+            <span class="mono"><b>{{.Name}}</b></span>
+            <span class="faint mono">{{.Counts.Active}}/{{.Counts.Total}}</span>
+          </div>
+          <div class="bar">
+            <span class="b-active" style="width:{{pct .Counts.Active .Counts.Total}}%"></span>
+            <span class="b-standby" style="width:{{pct .Counts.Standby .Counts.Total}}%"></span>
+            <span class="b-exhausted" style="width:{{pct .Counts.Exhausted .Counts.Total}}%"></span>
+            <span class="b-retired" style="width:{{pct .Counts.Retired .Counts.Total}}%"></span>
+          </div>
+        </div>
+        {{end}}
+        <div class="bar-legend">
+          <span><i class="b-active"></i> active</span>
+          <span><i class="b-standby"></i> standby</span>
+          <span><i class="b-exhausted"></i> exhausted</span>
+          <span><i class="b-retired"></i> retired</span>
+        </div>
+        {{else}}
+        <div class="empty">No providers configured.</div>
+        {{end}}
+      </div>
+    </div>
+
+    <div class="panel">
+      <div class="panel-head"><h3>{{svg "chart"}} Error categories</h3></div>
+      <div class="panel-body">
+        {{if .ErrorCategories}}
+        <table>
+          <thead><tr><th>Category</th><th>Provider</th><th class="num">Count</th></tr></thead>
+          <tbody>
+          {{range .ErrorCategories}}
+            <tr>
+              <td class="mono">{{.Category}}</td>
+              <td class="mono">{{.Provider}}</td>
+              <td class="num">{{.Count}}</td>
+            </tr>
+          {{end}}
+          </tbody>
+        </table>
+        {{else}}
+        <div class="empty">No classified errors yet.</div>
+        {{end}}
+      </div>
+    </div>
+  </div>
+</div>
+{{end}}

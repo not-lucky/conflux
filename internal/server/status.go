@@ -23,16 +23,18 @@ func (s *Server) handleStatus(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(http.StatusMethodNotAllowed)
 		return
 	}
-	clientKeys := make([]string, len(s.Config.Auth.ClientKeys))
-	for i, k := range s.Config.Auth.ClientKeys {
+	l := s.liveSnapshot()
+	cfg := l.Config
+	clientKeys := make([]string, len(cfg.Auth.ClientKeys))
+	for i, k := range cfg.Auth.ClientKeys {
 		clientKeys[i] = redact.Key(k)
 	}
-	globalProxies := make([]string, len(s.Config.Proxies.URLs))
-	for i, u := range s.Config.Proxies.URLs {
+	globalProxies := make([]string, len(cfg.Proxies.URLs))
+	for i, u := range cfg.Proxies.URLs {
 		globalProxies[i] = redact.URL(u)
 	}
 	providers := map[string]any{}
-	for _, p := range s.Config.Providers {
+	for _, p := range cfg.Providers {
 		providers[p.Name] = map[string]any{
 			"baseUrl":              p.BaseURL,
 			"models":               modelStrings(p.Models),
@@ -54,10 +56,10 @@ func (s *Server) handleStatus(w http.ResponseWriter, r *http.Request) {
 	// change; /_status only reads metrics.
 
 	ph := map[string]metrics.ProxyHealth{}
-	if s.proxyHealth != nil {
-		ph = s.proxyHealth()
+	if l.ProxyHealth != nil {
+		ph = l.ProxyHealth()
 	} else {
-		for _, u := range s.Config.ProxyURLs() {
+		for _, u := range cfg.ProxyURLs() {
 			ph[redact.URL(u)] = metrics.ProxyHealth{Healthy: true}
 		}
 	}

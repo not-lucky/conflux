@@ -6,7 +6,9 @@ import (
 
 // parseModelEntry validates one `models` entry and returns its parsed form.
 // The rules are:
-//   - non-empty, no whitespace, no ":"
+//   - non-empty, no whitespace
+//   - ":" is allowed (model ids such as "nvidia/nemotron-3.5-lightning:free"
+//     carry an OpenRouter free-tier suffix); it is not a delimiter here
 //   - "*" only as a trailing suffix or standalone
 //   - "*foo", "a*b", "a *", and "" are errors
 //
@@ -18,9 +20,6 @@ func parseModelEntry(s string) (ModelEntry, error) {
 	}
 	if strings.ContainsAny(s, " \t") {
 		return ModelEntry{}, wrapf(ErrInvalidModel, "", "model entry %q contains whitespace", s)
-	}
-	if strings.ContainsRune(s, ':') {
-		return ModelEntry{}, wrapf(ErrInvalidModel, "", "model entry %q contains ':'", s)
 	}
 	if s == "*" {
 		return ModelEntry{Kind: ModelCatchAll, Literal: "*"}, nil

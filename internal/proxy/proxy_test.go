@@ -207,3 +207,43 @@ func TestRestoreSkipsZeroDeadUntil(t *testing.T) {
 		t.Errorf("ConsecutiveErrors = %d, want 1", entries[0].ConsecutiveErrors)
 	}
 }
+
+func TestHealthTripAndReset(t *testing.T) {
+	clk := &fakeClock{t: time.Unix(0, 0)}
+	h := NewHealth(clk)
+
+	// A healthy URL reports healthy and is unaffected by Reset.
+	h.Reset("http://p:8080")
+	if !h.Healthy("http://p:8080") {
+		t.Fatal("Reset on an untripped URL should keep it healthy")
+	}
+
+	// Trip with a cooldown makes it unhealthy until the cooldown elapses.
+	h.Trip("http://p:8080", "dial fail", 30*time.Second)
+	if h.Healthy("http://p:8080") {
+		t.Fatal("Tripped URL should be unhealthy")
+	}
+	snap := h.Snapshot([]string{"http://p:8080"})
+	if snap[0].Healthy || snap[0].LastError != "dial fail" {
+		t.Fatalf("snapshot = %+v", snap[0])
+	}
+	clk.Add(31 * time.Second)
+	if !h.Healthy("http://p:8080") {
+		t.Fatal("URL should be healthy after cooldown elapses")
+	}
+
+	// Trip with zero cooldown trips indefinitely until Reset.
+	h.Trip("http://p:8080", "", 0)
+	if h.Healthy("http://p:8080") {
+		t.Fatal("Tripped URL with zero cooldown should stay unhealthy")
+	}
+	clk.Add(1000 * time.Hour)
+	if h.Healthy("http://p:8080") {
+		t.Fatal("zero-cooldown trip should remain tripped far into the future")
+	}
+	// Reset re-enables it.
+	h.Reset("http://p:8080")
+	if !h.Healthy("http://p:8080") {
+		t.Fatal("Reset should re-enable a tripped URL")
+	}
+}

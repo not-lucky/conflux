@@ -29,9 +29,14 @@ func (s *Server) handleProxy(w http.ResponseWriter, r *http.Request) {
 	reqID := fmt.Sprintf("%016x", time.Now().UnixNano())
 	span := s.Tracer.Open(reqID)
 	defer span.Close()
+	// Load the live runtime snapshot once per request so a config reload is
+	// picked up atomically: a request sees a consistent config/registry/
+	// forwarder/validator set even if Reload publishes a new snapshot mid-
+	// request.
+	l := s.liveSnapshot()
 	// 1. Client key extraction and auth.
 	ck := auth.ExtractKey(r.Header)
-	if !s.Validator.Validate(ck) {
+	if !l.Validator.Validate(ck) {
 		s.Metrics.RecordError("", "UNAUTHORIZED")
 		writeError(w, http.StatusUnauthorized, "invalid_client_key", "missing or invalid client key")
 		return
@@ -50,7 +55,7 @@ func (s *Server) handleProxy(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	// 4. Route to the provider.
-	provName, ok := s.Registry.Match(modelName)
+	provName, ok := l.Registry.Match(modelName)
 	if !ok {
 		s.Metrics.RecordError("", "CLIENT_ERROR")
 		writeError(w, http.StatusNotFound, "model_not_found", fmt.Sprintf("no provider for model %q", modelName))
@@ -59,10 +64,10 @@ func (s *Server) handleProxy(w http.ResponseWriter, r *http.Request) {
 	// 5. Rate limit: provider rate_limit_rpm takes precedence over defaults
 	// rate_limit_rpm.
 	rpm := 0
-	if prov, ok := s.Config.ProviderByName(provName); ok && prov.RateLimitRPM > 0 {
+	if prov, ok := l.Config.ProviderByName(provName); ok && prov.RateLimitRPM > 0 {
 		rpm = prov.RateLimitRPM
-	} else if s.Config.Defaults.RateLimitRPM > 0 {
-		rpm = s.Config.Defaults.RateLimitRPM
+	} else if l.Config.Defaults.RateLimitRPM > 0 {
+		rpm = l.Config.Defaults.RateLimitRPM
 	}
 	if rpm > 0 && !s.Limiter.Allow(ck, rpm) {
 		s.Metrics.RecordError(provName, "CLIENT_RATE_LIMIT")
@@ -99,7 +104,7 @@ func (s *Server) handleProxy(w http.ResponseWriter, r *http.Request) {
 	}
 	span.WriteRequest(reqInfo)
 	// 7. Forward.
-	resp, err := s.Forwarder.Do(r.Context(), freq)
+	resp, err := l.Forwarder.Do(r.Context(), freq)
 	if err != nil {
 		s.finishError(errorFinish{
 			span:    span,
@@ -136,12 +141,13 @@ func (s *Server) handleProxy(w http.ResponseWriter, r *http.Request) {
 	}
 	// 8. Inject x-conflux-* headers before WriteHeader, then copy the response.
 	s.finishSuccess(successFinish{
-		span:  span,
-		w:     w,
-		r:     r,
-		prov:  provName,
-		resp:  resp,
-		start: start,
+		span:   span,
+		w:      w,
+		r:      r,
+		prov:   provName,
+		resp:   resp,
+		expose: l.Config.Server.ExposeDiagnostics,
+		start:  start,
 	})
 }
 
@@ -217,12 +223,13 @@ func (s *Server) finishError(ef errorFinish) {
 // successFinish carries the data for a success finish, mirroring
 // errorFinish for the success path.
 type successFinish struct {
-	span  *trace.Span
-	w     http.ResponseWriter
-	r     *http.Request
-	prov  string
-	resp  *forward.Response
-	start time.Time
+	span   *trace.Span
+	w      http.ResponseWriter
+	r      *http.Request
+	prov   string
+	resp   *forward.Response
+	expose bool
+	start  time.Time
 }
 
 // finishSuccess is the success finish path: write the response headers/body
@@ -252,7 +259,7 @@ func (s *Server) finishSuccess(sf successFinish) {
 	} else {
 		sf.span.WriteResponseJSON(sf.resp.Body)
 	}
-	injectConfluxHeaders(sf.w, sf.prov, sf.resp, s.Config.Server.ExposeDiagnostics)
+	injectConfluxHeaders(sf.w, sf.prov, sf.resp, sf.expose)
 	copyResponse(sf.w, sf.r, sf.resp)
 	sf.span.WriteMeta(trace.Meta{
 		Provider:    sf.prov,

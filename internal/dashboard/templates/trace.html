@@ -1,0 +1,57 @@
+{{define "content-trace"}}
+<div id="traces-region">
+  <div class="page-head">
+    <div>
+      <h2>Trace · {{.ID}}</h2>
+      <div class="sub mono">{{.Dir}}</div>
+    </div>
+    <div class="actions">
+      <a class="btn sm" href="/_dashboard/traces">← all traces</a>
+    </div>
+  </div>
+
+  <div class="grid cols-3" style="margin-bottom:16px">
+    <div class="stat"><div class="label">Provider</div><div class="value sm mono">{{.Provider}}</div></div>
+    <div class="stat"><div class="label">Model</div><div class="value sm mono">{{.Model}}</div></div>
+    <div class="stat"><div class="label">Duration</div><div class="value sm mono">{{if .DurationMs}}{{.DurationMs}}ms{{else}}—{{end}}</div></div>
+  </div>
+
+  {{if .Meta}}
+  <div class="panel" style="margin-bottom:16px">
+    <div class="panel-head"><h3>{{svg "info"}} meta.json</h3></div>
+    <div class="panel-body">
+      <div class="kv">
+        <span class="k">key number</span><span class="v">{{if .Meta.KeyNumber}}{{.Meta.KeyNumber}}{{else}}—{{end}}</span>
+        <span class="k">proxy</span><span class="v">{{if .Meta.Proxy}}{{.Meta.Proxy}}{{else}}direct{{end}}</span>
+        <span class="k">proxy number</span><span class="v">{{if .Meta.ProxyNumber}}{{.Meta.ProxyNumber}}{{else}}—{{end}}</span>
+        <span class="k">attempts</span><span class="v">{{if .Meta.Attempt}}{{.Meta.Attempt}}{{else}}—{{end}}</span>
+        <span class="k">category</span><span class="v">{{.Meta.Category}}</span>
+        <span class="k">timestamp</span><span class="v">{{.Meta.Timestamp}}</span>
+      </div>
+    </div>
+  </div>
+  {{end}}
+
+  {{if .Files}}
+  <div class="panel">
+    <div class="panel-head">
+      <h3>{{svg "file"}} Trace files</h3>
+      <div class="row gap-s">
+        {{range .Files}}
+        <a class="btn sm {{if eq . $.Active}}primary{{end}}" href="/_dashboard/trace?dir={{$.DirEnc}}&file={{.}}">{{.}}</a>
+        {{end}}
+      </div>
+    </div>
+    <div class="panel-body">
+      {{if .ActiveContent}}
+      <pre class="blob">{{.ActiveContent}}</pre>
+      {{else}}
+      <div class="empty">Select a file to view its contents.</div>
+      {{end}}
+    </div>
+  </div>
+  {{else}}
+  <div class="panel"><div class="empty">This trace has no files.</div></div>
+  {{end}}
+</div>
+{{end}}

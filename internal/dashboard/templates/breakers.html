@@ -1,0 +1,50 @@
+{{define "content-breakers"}}
+<div id="breakers-region">
+  <div class="page-head">
+    <div>
+      <h2>Circuit breakers</h2>
+      <div class="sub">Per-provider upstream-5xx breakers. Open providers skip 5xx retries.</div>
+    </div>
+  </div>
+
+  {{if .Breakers}}
+  <div class="panel">
+    <div class="panel-head">
+      <h3>{{svg "breaker"}} Provider breakers</h3>
+      <span class="meta">{{.OpenCount}} open · {{len .Breakers}} total</span>
+    </div>
+    <table>
+      <thead>
+        <tr><th>Provider</th><th>State</th><th class="num">5xx run</th><th class="num">Threshold</th><th>Open until</th><th class="num">Actions</th></tr>
+      </thead>
+      <tbody>
+      {{range .Breakers}}
+        <tr>
+          <td class="mono"><b>{{.Provider}}</b></td>
+          <td>{{if .Open}}<span class="pill err">open</span>{{else}}<span class="pill ok">closed</span>{{end}}</td>
+          <td class="num mono">{{.Consecutive5xx}}</td>
+          <td class="num mono">{{.Threshold}}</td>
+          <td class="mono faint">{{if .OpenUntil}}{{.OpenUntil}}{{else}}—{{end}}</td>
+          <td class="num">
+            <button class="btn sm"
+                    hx-post="/_dashboard/act/breakers/reset?provider={{.Provider}}"
+                    hx-target="#breakers-region"
+                    hx-swap="outerHTML"
+                    data-toast="breaker closed">reset</button>
+            <button class="btn sm warn"
+                    hx-post="/_dashboard/act/breakers/open?provider={{.Provider}}"
+                    hx-target="#breakers-region"
+                    hx-swap="outerHTML"
+                    data-confirm="Force-open the {{.Provider}} breaker for its configured cooldown?"
+                    data-toast="breaker opened">force open</button>
+          </td>
+        </tr>
+      {{end}}
+      </tbody>
+    </table>
+  </div>
+  {{else}}
+  <div class="panel"><div class="empty">No providers configured.</div></div>
+  {{end}}
+</div>
+{{end}}

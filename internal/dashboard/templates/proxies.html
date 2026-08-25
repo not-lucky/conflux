@@ -1,0 +1,50 @@
+{{define "content-proxies"}}
+<div id="proxies-region">
+  <div class="page-head">
+    <div>
+      <h2>Proxies</h2>
+      <div class="sub">Egress pool health, circuit-breaker state, and manual trip/reset.</div>
+    </div>
+  </div>
+
+  {{if .Proxies}}
+  <div class="panel">
+    <div class="panel-head">
+      <h3>{{svg "proxy"}} Proxy health</h3>
+      <span class="meta">{{.Healthy}}/{{len .Proxies}} healthy</span>
+    </div>
+    <table>
+      <thead>
+        <tr><th>URL</th><th>State</th><th class="num">Errs</th><th>Dead until</th><th>Last error</th><th class="num">Actions</th></tr>
+      </thead>
+      <tbody>
+      {{range .Proxies}}
+        <tr>
+          <td class="mono">{{.URL}}</td>
+          <td>{{if .Healthy}}<span class="pill ok">healthy</span>{{else}}<span class="pill trip">tripped</span>{{end}}</td>
+          <td class="num mono">{{.ConsecutiveErrors}}</td>
+          <td class="mono faint">{{if .DeadUntil}}{{.DeadUntil}}{{else}}—{{end}}</td>
+          <td class="faint" style="max-width:300px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap" title="{{.LastError}}">{{if .LastError}}{{.LastError}}{{else}}—{{end}}</td>
+          <td class="num">
+            <button class="btn sm"
+                    hx-post="/_dashboard/act/proxies/reset?url={{.EncodedURL}}"
+                    hx-target="#proxies-region"
+                    hx-swap="outerHTML"
+                    data-toast="proxy reset">reset</button>
+            <button class="btn sm danger"
+                    hx-post="/_dashboard/act/proxies/trip?url={{.EncodedURL}}"
+                    hx-target="#proxies-region"
+                    hx-swap="outerHTML"
+                    data-confirm="Manually trip this proxy until reset?"
+                    data-toast="proxy tripped">trip</button>
+          </td>
+        </tr>
+      {{end}}
+      </tbody>
+    </table>
+  </div>
+  {{else}}
+  <div class="panel"><div class="empty">No proxies configured. Requests go direct.</div></div>
+  {{end}}
+</div>
+{{end}}

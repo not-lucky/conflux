@@ -1,6 +1,7 @@
 package app
 
 import (
+	"os"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -435,5 +436,123 @@ func TestStateSaverPushesGauges(t *testing.T) {
 	}
 	if strings.Contains(out, "user:pass@proxy1") {
 		t.Errorf("proxy gauge leaked credentials:\n%s", out)
+	}
+}
+
+// TestReloadSwapsRoutingAndPreservesState verifies that Reload re-reads the
+// config file, swaps the routing table and pools, preserves the current
+// in-memory key state (exhaustion carries over by hash), and keeps the
+// metrics registry intact.
+func TestReloadSwapsRoutingAndPreservesState(t *testing.T) {
+	dir := t.TempDir()
+	cfgPath := filepath.Join(dir, "config.yaml")
+	statePath := filepath.Join(dir, "state.yaml")
+
+	// Initial config: one provider "p" with a catch-all model and two keys.
+	initial := `
+server:
+  port: 24118
+auth:
+  client_keys: ["ck"]
+providers:
+  p:
+    base_url: "http://up.test"
+    keys:
+      - key: "key-1"
+      - key: "key-2"
+    models:
+      - "*"
+    max_errors: 2
+    cooldown: 1h
+persistence:
+  path: ` + statePath + `
+`
+	if err := os.WriteFile(cfgPath, []byte(initial), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	cfg, err := config.Load(cfgPath)
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	a, err := Build(cfg)
+	if err != nil {
+		t.Fatalf("Build: %v", err)
+	}
+
+	// Exhaust key #1 in memory.
+	pool := a.Pools["p"]
+	pool.RecordError(1)
+	pool.RecordError(1)
+	if c := pool.Counts(); c.Exhausted != 1 {
+		t.Fatalf("pre-reload counts = %+v, want 1 exhausted", c)
+	}
+
+	// The live snapshot routes any model to "p".
+	live := a.Live.Load()
+	if got, _ := live.Registry.Match("anything"); got != "p" {
+		t.Fatalf("pre-reload route = %q, want p", got)
+	}
+
+	// Rewrite the config: add a second provider "q" for a specific model, and
+	// keep the same two keys so their exhaustion carries over.
+	updated := `
+server:
+  port: 24118
+auth:
+  client_keys: ["ck"]
+providers:
+  p:
+    base_url: "http://up.test"
+    keys:
+      - key: "key-1"
+      - key: "key-2"
+    models:
+      - "*"
+    max_errors: 2
+    cooldown: 1h
+  q:
+    base_url: "http://q.test"
+    keys:
+      - key: "qkey-1"
+    models:
+      - q-model
+    max_errors: 2
+    cooldown: 1h
+persistence:
+  path: ` + statePath + `
+`
+	if err := os.WriteFile(cfgPath, []byte(updated), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	if err := a.Reload(cfgPath); err != nil {
+		t.Fatalf("Reload: %v", err)
+	}
+
+	// Routing now distinguishes q-model -> q, others -> p.
+	live2 := a.Live.Load()
+	if got, _ := live2.Registry.Match("q-model"); got != "q" {
+		t.Fatalf("post-reload route(q-model) = %q, want q", got)
+	}
+	if got, _ := live2.Registry.Match("anything"); got != "p" {
+		t.Fatalf("post-reload route(anything) = %q, want p", got)
+	}
+	// Pools now include q.
+	if _, ok := live2.Pools["q"]; !ok {
+		t.Error("post-reload live snapshot missing pool q")
+	}
+
+	// Key #1 exhaustion carried over (same key value -> same hash).
+	pool2 := live2.Pools["p"]
+	if c := pool2.Counts(); c.Exhausted != 1 {
+		t.Fatalf("post-reload p counts = %+v, want 1 exhausted carried over", c)
+	}
+
+	// App-level mirror fields updated.
+	if a.Registry != live2.Registry {
+		t.Error("App.Registry should mirror the reloaded registry")
+	}
+	if _, ok := a.Pools["q"]; !ok {
+		t.Error("App.Pools should mirror the reloaded pools")
 	}
 }

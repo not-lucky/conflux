@@ -1,7 +1,10 @@
 package app
 
 import (
+	"bytes"
 	"context"
+	"crypto/tls"
+	"crypto/x509"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -107,5 +110,69 @@ func TestDoTTFBCancel(t *testing.T) {
 	}
 	if !cancelled.Load() {
 		t.Error("server handler did not observe request context cancellation")
+	}
+}
+
+// TestDoKeepsContextAliveWhileReadingBody is a regression test for the bug
+// where the doer canceled the TTFB context immediately after the response
+// headers arrived — before the response body was read. Because the request
+// (and thus the response body) reads through that context, canceling it
+// mid-response RST_STREAMs the HTTP/2 stream: the server observes its request
+// context cancel before it has finished writing the body, and the pooled
+// client connection is torn down so later reuses of the cached transport fail
+// with "context canceled" (surfaced upstream as PROXY_NETWORK_ERROR).
+//
+// The fix reads and closes the body while the TTFB context is still live, then
+// cancels. The test asserts the server's request context stays alive
+// throughout the body write, proving the client no longer cancels mid-body.
+func TestDoKeepsContextAliveWhileReadingBody(t *testing.T) {
+	var canceledDuringBody atomic.Bool
+	srv := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusOK)
+		// Flush headers so the client receives them (and, with the bug, cancels
+		// its TTFB context) before the body is written.
+		if f, ok := w.(http.Flusher); ok {
+			f.Flush()
+		}
+		time.Sleep(150 * time.Millisecond)
+		// If the buggy client canceled its TTFB context right after the headers,
+		// the RST_STREAM has propagated and canceled the server-side request
+		// context by now. The fixed client keeps the context alive until the
+		// body is fully read, so it is still nil here.
+		if r.Context().Err() != nil {
+			canceledDuringBody.Store(true)
+		}
+		_, _ = w.Write([]byte(`{"ok":true}`))
+	}))
+	defer srv.Close()
+
+	pool := x509.NewCertPool()
+	pool.AddCert(srv.Certificate())
+	rt := &http.Transport{
+		TLSClientConfig:   &tls.Config{RootCAs: pool},
+		ForceAttemptHTTP2: true,
+	}
+	d := newHTTPDoer()
+	d.transports[""] = rt
+
+	resp, err := d.Do(context.Background(), &forward.UpstreamRequest{
+		Method:  "POST",
+		URL:     srv.URL,
+		TTFB:    5 * time.Second,
+		Body:    []byte(`{}`),
+		Headers: http.Header{"Content-Type": []string{"application/json"}},
+	})
+	if err != nil {
+		t.Fatalf("Do: unexpected error: %v", err)
+	}
+	if resp.Status != http.StatusOK {
+		t.Fatalf("status = %d, want 200", resp.Status)
+	}
+	if !bytes.Equal(resp.BodyBuf, []byte(`{"ok":true}`)) {
+		t.Fatalf("body = %q, want {\"ok\":true}", string(resp.BodyBuf))
+	}
+	if canceledDuringBody.Load() {
+		t.Error("server request context was canceled before the body was fully written; the doer must keep the request context alive until the body is read")
 	}
 }

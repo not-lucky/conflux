@@ -1,0 +1,32 @@
+{{define "layout"}}
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Conflux Dashboard</title>
+  <link rel="stylesheet" href="/_dashboard/assets/dashboard.css">
+  <script src="/_dashboard/assets/htmx.min.js" defer></script>
+  <script src="/_dashboard/assets/dashboard.js" defer></script>
+</head>
+<body>
+  <div class="app">
+    <aside class="sidebar">
+      <div class="brand">
+        <h1>{{svg "logo"}} Conflux</h1>
+        <div class="ver">gateway v{{.Version}}</div>
+      </div>
+      <nav class="nav">
+        {{$active := .Active}}
+        {{range .Nav}}
+        <a href="/_dashboard/{{.Path}}" class="{{if eq .Path $active}}active{{end}}">{{svg .Icon}} <span>{{.Label}}</span></a>
+        {{end}}
+      </nav>
+    </aside>
+    <main class="main">
+      {{.Body}}
+    </main>
+  </div>
+</body>
+</html>
+{{end}}

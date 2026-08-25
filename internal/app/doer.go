@@ -80,11 +80,22 @@ func (d *httpDoer) Do(ctx context.Context, req *forward.UpstreamRequest) (*forwa
 	}()
 	select {
 	case r := <-ch:
-		ttfbCancel() // no-op if headers arrived in time; harmless
 		if r.err != nil {
+			// The fetch failed before headers (dial, TLS, or a transport
+			// error). Cancel ttfbCtx now; there is no body to drain.
+			ttfbCancel()
 			return nil, r.err
 		}
-		return d.readResponse(ctx, r.resp, req)
+		// Headers arrived: the TTFB deadline is satisfied. ttfbCtx is still the
+		// context the response body reads through, so it MUST stay alive until
+		// the body is fully consumed. Canceling it here — as this code did
+		// before — tears down the pooled HTTP/2 connection mid-read, so the
+		// next attempt that reuses this cached transport fails instantly with
+		// "context canceled" (surfaced as PROXY_NETWORK_ERROR). For a buffered
+		// JSON response we read+close the body now and then cancel; for an SSE
+		// stream we hand the body off with a cancel-on-close wrapper so the
+		// stream stays live until the downstream consumer closes it.
+		return d.readResponse(r.resp, req, ttfbCancel)
 	case <-time.After(ttfb):
 		// Cancel the in-flight request at TTFB (not at the forwarder's
 		// deadline) so c.Do returns promptly and the upstream connection is
@@ -100,23 +111,34 @@ func (d *httpDoer) Do(ctx context.Context, req *forward.UpstreamRequest) (*forwa
 	}
 }
 
-func (d *httpDoer) readResponse(ctx context.Context, resp *http.Response, req *forward.UpstreamRequest) (*forward.UpstreamResponse, error) {
+// readResponse finalizes the upstream response. For a buffered (JSON) response
+// it reads the body up to a reasonable cap for classification, closes the body,
+// and then cancels the TTFB context — in that order, so the body read happens
+// under a live request context and the pooled connection is not torn down
+// mid-read. For an SSE stream it hands the body off wrapped in a
+// cancel-on-close reader, so the stream stays live for its full lifetime and
+// the TTFB context is canceled when the downstream consumer closes the body.
+// ttfbCancel is always invoked exactly once.
+func (d *httpDoer) readResponse(resp *http.Response, req *forward.UpstreamRequest, ttfbCancel context.CancelFunc) (*forward.UpstreamResponse, error) {
 	ct := resp.Header.Get("Content-Type")
-	isSSE := stream.IsSSE(ct)
-	if isSSE {
+	if stream.IsSSE(ct) {
 		// For a stream, return the body as a ReadCloser for the forwarder to
-		// peek.
+		// peek. Keep ttfbCtx alive for the stream's lifetime; cancel it when the
+		// body is closed so the underlying connection is released promptly once
+		// the stream is done.
 		return &forward.UpstreamResponse{
 			Status:  resp.StatusCode,
 			Headers: resp.Header,
-			Body:    resp.Body,
+			Body:    &cancelOnClose{ReadCloser: resp.Body, cancel: ttfbCancel},
 			IsSSE:   true,
 		}, nil
 	}
 	// For JSON and other buffered responses, read the body up to a reasonable
-	// cap for classification.
+	// cap for classification. Read and close while ttfbCtx is still live so the
+	// body read is not aborted mid-flight; only then cancel the TTFB context.
 	body, err := io.ReadAll(io.LimitReader(resp.Body, 16*1024*1024))
 	resp.Body.Close()
+	ttfbCancel()
 	if err != nil {
 		return nil, err
 	}
@@ -177,4 +199,22 @@ func bodyReader(b []byte) io.Reader {
 		return nil
 	}
 	return bytes.NewReader(b)
+}
+
+// cancelOnClose wraps an io.ReadCloser so that Close invokes a cancel func
+// exactly once, in addition to closing the wrapped body. It is used to tie the
+// TTFB request context's lifetime to an SSE stream body: the stream reads
+// through that context for its full lifetime, and the context is canceled
+// (freeing the pooled connection) only once the downstream consumer closes
+// the body.
+type cancelOnClose struct {
+	once   sync.Once
+	cancel context.CancelFunc
+	io.ReadCloser
+}
+
+func (c *cancelOnClose) Close() error {
+	err := c.ReadCloser.Close()
+	c.once.Do(c.cancel)
+	return err
 }

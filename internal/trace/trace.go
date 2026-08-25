@@ -43,6 +43,20 @@ func ParseLevel(s string) Level {
 	}
 }
 
+// String renders the level for display (the dashboard trace viewer).
+func (l Level) String() string {
+	switch l {
+	case Full:
+		return "full"
+	case ErrorsOnly:
+		return "errors_only"
+	case Off:
+		return "off"
+	default:
+		return "unknown"
+	}
+}
+
 // Tracer writes per-request traces and prunes retention. Tracer is safe for
 // concurrent use; each Span is single-goroutine, the request handler.
 type Tracer struct {
@@ -65,6 +79,10 @@ func New(root string, level Level, maxDirs int) *Tracer {
 
 // Level returns the configured level.
 func (t *Tracer) Level() Level { return t.level }
+
+// Root returns the base logs directory ("./logs" by default). The dashboard
+// uses it to browse on-disk trace and error directories.
+func (t *Tracer) Root() string { return t.root }
 
 // Span is one request trace. Open it, write fields, and Close to finalize.
 type Span struct {

@@ -302,6 +302,23 @@ func (p *Pool) MarkExhausted(keyNumber int) {
 	}
 }
 
+// Reset clears one key's runtime health state: consecutive-error counter,
+// exhaustion timestamp, and retirement. It re-enables an exhausted or retired
+// key immediately, bypassing the cooldown. It is a no-op when the key index is
+// out of range. Used by the dashboard's per-key "reset" action.
+func (p *Pool) Reset(keyNumber int) {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	i := keyNumber - 1
+	if i < 0 || i >= len(p.spec.Keys) {
+		return
+	}
+	p.consecutiveErrors[i] = 0
+	p.exhaustedAt[i] = time.Time{}
+	p.retired[i] = false
+	p.retiredAt[i] = time.Time{}
+}
+
 // State snapshots a single key for persistence or status.
 type KeyState struct {
 	ConsecutiveErrors int
