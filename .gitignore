@@ -1,1 +1,6 @@
 config.toml
+/conflux
+/conflux.exe
+*.test
+*.out
+./config.yaml

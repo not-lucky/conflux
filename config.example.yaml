@@ -1,0 +1,391 @@
+# =============================================================================
+# Conflux v3.0 — example configuration
+# =============================================================================
+#
+# This is a fully annotated reference configuration. Copy it to config.yaml
+# (or any path, passed with -config / the CONFIG_PATH env var) and edit.
+#
+# Loading is STRICT: every unknown key is a startup error, so typos fail loud
+# instead of silently misconfiguring the gateway. Validations (port ranges,
+# duration syntax, duplicate keys, model overlap, catch-all rules, proxy
+# scheme/shape, fallback non-emptiness, active_window bounds, etc.) all run at
+# load time — a config that loads is a valid config.
+#
+# ---------------------------------------------------------------------------
+# How field values are resolved (the inheritance chain)
+# ---------------------------------------------------------------------------
+#
+# Every shared "policy" field follows this precedence (first present wins):
+#
+#     providers.<name>.<field>   →   defaults.<field>   →   built-in default
+#
+# The resolved value is baked into the config tree at load time; there is NO
+# runtime inheritance lookup. Runtime code only ever reads fully-resolved
+# fields, so a misconfigured provider cannot accidentally fall back at
+# request time.
+#
+# Note: defaults.<timeout fields> themselves default to the server.* timeouts.
+# So if you set server.request_timeout once, every provider inherits it
+# unless you override it per provider or in defaults.
+#
+# ---------------------------------------------------------------------------
+# Duration syntax (applies to every *_timeout / *_cooldown / *_interval field)
+# ---------------------------------------------------------------------------
+#
+#   ^[0-9]+(ms|s|m|h)$
+#
+# Exactly one unit, integer coefficient, no decimals, no combined forms:
+#   OK:    30s   250ms   5m   1h   180s
+#   ERROR: 1h30m   1.5h   0s   30   30sec   1d
+# A zero/positive-zero value (e.g. "0s") is rejected as "duration must be >0".
+# Use "off" semantics by omitting the field where supported (e.g. rate limiting,
+# keepalive) or by choosing the relevant level (logging).
+# =============================================================================
+
+
+# -----------------------------------------------------------------------------
+# server — the HTTP listener and global request framing
+# -----------------------------------------------------------------------------
+server:
+  # Port to listen on. Range 1-65535. Default: 24118.
+  port: 24118
+
+  # Per-attempt time-to-first-byte (TTFB) deadline: the upstream must send the
+  # response headers within this window or the attempt is aborted and
+  # classified as PROXY_NETWORK_ERROR (retryable, proxy-penalized, key-safe).
+  # Default: 60s.
+  request_timeout: 120s
+
+  # SSE idle watchdog: if no bytes flow between SSE lines for this long while
+  # streaming to the client, Conflux sends a terminal error chunk and closes.
+  # 0 disables it in spirit, but the field requires a positive duration; set
+  # a large value (e.g. 1h) to effectively disable. Default: 15s.
+  stream_idle_timeout: 20s
+
+  # SSE keepalive: emit a ": keepalive\n\n" comment line at this interval so
+  # downstream intermediaries (proxies, load balancers) do not time out idle
+  # streams. Default: 15s.
+  stream_keepalive_interval: 15s
+
+  # End-to-end deadline spanning ALL retry attempts for one client request.
+  # When it elapses, the in-flight attempt is cancelled and the best response
+  # so far (or a 502) is returned. Should be >= request_timeout and large
+  # enough to allow the configured retry budget. Default: 180s.
+  request_deadline: 600s
+
+  # Inject X-Conflux-* diagnostic headers on responses (provider, model, key
+  # number, proxy number, attempt count, terminal error). Disable in
+  # production if you do not want to leak routing details to clients.
+  # Default: true.
+  expose_diagnostics: true
+
+  # Admin token for protected admin endpoints (e.g. /admin/reload). Empty
+  # string disables admin access entirely (those endpoints always return 401).
+  # MUST NOT equal any entry in auth.client_keys (validated at load time).
+  # Default: "" (admin disabled).
+  admin_token: "admin-secret-change-me"
+
+
+# -----------------------------------------------------------------------------
+# auth — client-facing authentication
+# -----------------------------------------------------------------------------
+# Clients authenticate to Conflux with ONE of these client keys (sent as
+# "Authorization: Bearer <key>", "x-api-key: <key>", or "api-key: <key>"). Any
+# single valid key grants access to ALL providers and ALL models. There is no
+# per-provider client key concept (per-provider client_keys is rejected).
+auth:
+  # REQUIRED, >=1 entry, non-empty, no duplicates. The literal "*" is not
+  # allowed here (wildcards are for models, not client keys).
+  client_keys:
+    - "sk-conflux-global-001"
+    - "sk-conflux-global-002"
+
+
+# -----------------------------------------------------------------------------
+# logging — on-disk request tracing and retention
+# -----------------------------------------------------------------------------
+logging:
+  # Trace verbosity. Default: full.
+  #   full        — per-request trace dir under logs/trace/ (request, response,
+  #                  headers, stream, meta) PLUS error dirs under logs/error/
+  #   errors_only — only error dirs under logs/error/ (no per-request traces)
+  #   off         — no on-disk tracing at all
+  level: full
+
+  # Retention cap: keep at most this many subdirs in logs/trace/ and
+  # logs/error/. Oldest dirs (by timestamped name) are pruned beyond the cap.
+  # Must be >=0. Default: 1000.
+  max_dirs: 1000
+
+
+# -----------------------------------------------------------------------------
+# proxies — GLOBAL egress proxy pool (shared by all providers that don't
+# define their own `proxies:` and don't pin a key-level `proxy:`)
+# -----------------------------------------------------------------------------
+proxies:
+  # List of proxy URLs. Empty (or omitted) means NO global proxy — requests go
+  # direct. Each URL: scheme must be http, https, socks5, or socks5h, with a
+  # non-empty host. Credentials may be embedded:
+  #   "http://user:pass@proxy-host:8080"  (stripped from all observable output)
+  # Default: [] (direct).
+  urls:
+    - "http://proxy-a.example.com:8080"
+    - "socks5://proxy-b.example.com:1080"
+
+  # Rotation: shift the (slot → proxy) mapping every N per-provider
+  # round-robin cycles, so load spreads across the pool over time. Must be
+  # >=1 when PRESENT. OMIT this key for STICKY pinning (each key slot keeps the
+  # same proxy until that proxy trips). Setting 0 explicitly is a startup
+  # error — omit it instead. Default: omitted (sticky).
+  # rotate_interval: 10
+
+  # Consecutive errors through a proxy URL before it is "tripped" (marked dead
+  # for `cooldown`). Must be >=1. Default: 3.
+  max_errors: 3
+
+  # How long a tripped proxy stays dead before it is eligible again. A tripped
+  # proxy is excluded at all levels until this elapses. Default: 30s.
+  cooldown: 30s
+
+
+# -----------------------------------------------------------------------------
+# defaults — policy fields inherited by EVERY provider (override per provider)
+# -----------------------------------------------------------------------------
+# Any field here is the fallback when a provider omits it. Omit a field here
+# too and the built-in default applies. The timeout fields below default to
+# the matching server.* values, so setting them once on `server` propagates.
+defaults:
+  # Key selection within a provider's pool.
+  key_selection:
+    # round_robin — advance through the active window, reusing each slot
+    #               `requests_per_key` times before moving on.
+    # sticky     — pin to one key; only jump to the next healthy key when the
+    #               current one is PENALIZED (exhausted/retired/auth-fatal).
+    # NOTE: setting requests_per_key together with mode: sticky is an error.
+    # Default: round_robin.
+    mode: round_robin
+    # Use a slot this many times before advancing (round_robin only).
+    # Must be >=1. Default: 1.
+    requests_per_key: 1
+
+  # How many keys are ACTIVE at once. The first N healthy keys (by declaration
+  # order) are active; the rest are STANDBY and promote FIFO as active keys
+  # exhaust. Must be >=1 when PRESENT. OMIT for "all keys active" (explicit 0
+  # is a startup error — omit it instead). Per-provider must be <= len(keys).
+  # Default: omitted (all keys active).
+  # active_window: 3
+
+  # Consecutive penalizing errors on a key before it exhausts (or retires, see
+  # below). PENALIZED categories that count: KEY_RATE_LIMITED, KEY_AUTH_FATAL,
+  # KEY_BILLING. (Shared-pool 429, proxy errors, and upstream 5xx do NOT
+  # penalize the key.) Must be >=1. Default: 5.
+  max_errors: 5
+
+  # How long an exhausted key stays out before lazy re-entry. After this
+  # elapses the key is eligible again on its next selection. Default: 5h.
+  cooldown: 5h
+
+  # true  — when a key hits max_errors, RETIRE it permanently (never re-enters).
+  # false — just exhaust it; it re-enters after `cooldown` (see above).
+  # Default: false.
+  retire_on_exhaustion: false
+
+  # SSE stream-retry budget: how many error-chunks may trigger a retry mid
+  # stream. An SSE attempt that yields an error envelope in its first chunk
+  # (or a later chunk) can be retried up to this many times, subject also to
+  # the attempt budget. Must be >=0. Default: 3.
+  max_stream_retries: 3
+
+  # Upstream-5xx circuit breaker: after this many CONSECUTIVE 5xx responses
+  # from a provider, open the breaker for `upstream_5xx_cooldown`. While open,
+  # 5xx responses are forwarded immediately (no retry) to shed load. A single
+  # 2xx/non-5xx success closes and resets the breaker. Must be >=1.
+  # Default: 5.
+  upstream_5xx_threshold: 5
+
+  # How long the provider breaker stays open. After it elapses the breaker is
+  # half-open (lets one request through; a 5xx re-trips, a success resets).
+  # Default: 30s.
+  upstream_5xx_cooldown: 30s
+
+  # Per-attempt TTFB (overrides server.request_timeout for this provider).
+  # Default: server.request_timeout.
+  request_timeout: 60s
+
+  # SSE idle watchdog (overrides server.stream_idle_timeout). Default: 15s.
+  stream_idle_timeout: 15s
+
+  # SSE keepalive interval (overrides server.stream_keepalive_interval).
+  # Default: 15s.
+  stream_keepalive_interval: 15s
+
+  # End-to-end deadline (overrides server.request_deadline). Default: 180s.
+  request_deadline: 180s
+
+  # Per-CLIENT-key rate limit (requests per minute, 60s sliding window).
+  # Must be >=1 when PRESENT. OMIT for UNLIMITED (explicit 0 is a startup
+  # error — omit it instead). The provider value (if set) takes precedence
+  # over this defaults value. Default: omitted (unlimited).
+  # rate_limit_rpm: 600
+
+  # Retry attempt budget for one request. Must be >=1 when PRESENT.
+  # OMIT for COMPUTED = min(active_window, 3), clamped to >=1 (explicit 0 is a
+  # startup error — omit it instead). Penalized retries use a DIFFERENT key;
+  # PROXY_NETWORK_ERROR retries reuse the same key through a different proxy.
+  # Default: omitted (computed).
+  # retry:
+  #   max_attempts: 3
+
+  # Model fallback map: when a request's model id equals a key, the body's
+  # top-level `model` field is rewritten to the value and sent upstream
+  # (Content-Type/Length fixed up; Content-Encoding dropped). Keys and values
+  # must be non-empty. Default: {} (no fallbacks).
+  fallback_models: {}
+
+
+# -----------------------------------------------------------------------------
+# providers — a MAP keyed by provider name (order is preserved; the 1-based
+# keyNumber is stable per declaration order)
+# -----------------------------------------------------------------------------
+# At least one provider is required. Provider names must not contain
+# whitespace or ":". Per-provider `client_keys` is REJECTED — use a catch-all
+# (models: ["*"]) for universal access instead.
+providers:
+
+  # -----------------------------------------------------------------------
+  # openai — OpenAI, with an active window, an inline per-key proxy, and a
+  # couple of exact + prefix models.
+  # -----------------------------------------------------------------------
+  openai:
+    # Absolute http(s):// URL. Trailing slash is stripped. The client's request
+    # path is appended (with first-segment dedup), so /v1/chat/completions
+    # + base https://api.openai.com/v1 → https://api.openai.com/v1/chat/completions
+    base_url: "https://api.openai.com/v1"
+
+    keys:
+      # Each key must be non-empty; duplicates (by SHA256 hash) are rejected.
+      # Optional `proxy:` pins THIS key to a single proxy URL (validated as a
+      # proxy URL). An inline proxy takes precedence over the provider pool and
+      # the global pool; if it trips, the attempt falls to direct.
+      - key: "sk-openai-000000000000000000000000000000000000000000000001"
+      - key: "sk-openai-000000000000000000000000000000000000000000000002"
+        proxy: "http://proxy-c.example.com:8080"
+      - key: "sk-openai-000000000000000000000000000000000000000000000003"
+
+    # >=1 entry. Three kinds:
+    #   exact   — "gpt-4o"           matches only that id
+    #   prefix  — "gpt-4*"          matches any id starting with "gpt-4"
+    #   catch-all — "*"              matches any unmatched id (see the catchall
+    #                               provider below; at most ONE globally)
+    # Rules: no whitespace, no ":"; "*" only as a trailing suffix or standalone.
+    # Cross-provider duplicate exact/prefix and multiple catch-alls are errors.
+    models:
+      - gpt-4o          # exact
+      - gpt-4o-mini     # exact
+      - gpt-4*          # prefix (longest-prefix wins among multiple prefixes)
+
+    # Only 2 keys active at once; the third is standby and promotes when an
+    # active key exhausts. Must be <= len(keys).
+    active_window: 2
+
+    # Override a few defaults for this provider.
+    key_selection:
+      mode: round_robin
+      requests_per_key: 1
+    max_errors: 5
+    cooldown: 5h
+    max_stream_retries: 3
+
+  # -----------------------------------------------------------------------
+  # anthropic — Anthropic, using sticky key selection and a fallback model.
+  # -----------------------------------------------------------------------
+  anthropic:
+    base_url: "https://api.anthropic.com/v1"
+    keys:
+      - key: "sk-ant-000000000000000000000000000000000000000000000001"
+      - key: "sk-ant-000000000000000000000000000000000000000000000002"
+
+    models:
+      - claude-3-5-sonnet
+      - claude-3*
+
+    # sticky: pin to one key; jump only on a penalizing error. requests_per_key
+    # is NOT valid with sticky (setting both is an error).
+    key_selection:
+      mode: sticky
+
+    # When a request asks for claude-3-5-sonnet, rewrite the body's `model`
+    # field to claude-3-5-haiku before forwarding upstream. Useful for routing
+    # a "premium" model name to a cheaper tier transparently.
+    fallback_models:
+      claude-3-5-sonnet: claude-3-5-haiku
+
+  # -----------------------------------------------------------------------
+  # mygateway — an OpenAI-compatible self-hosted gateway with its OWN
+  # provider-scoped proxy pool (object form only). Demonstrates per-provider
+  # proxy override, rotation, and a per-provider rate limit.
+  # -----------------------------------------------------------------------
+  mygateway:
+    base_url: "https://gateway.example.com/v1"
+    keys:
+      - key: "sk-gw-0000000000000000000000000000000000000000000000001"
+      - key: "sk-gw-0000000000000000000000000000000000000000000000002"
+
+    # This provider routes several model families.
+    models:
+      - deepseek-v3
+      - deepseek-r1
+      - qwen-*
+      - llama-*
+
+    # Provider-scoped proxy pool. MUST be the object form below — a YAML array
+    # is a startup error. When present, it OVERRIDES the global pool for this
+    # provider's keys (unless a key has an inline `proxy:`). max_errors and
+    # cooldown default to the GLOBAL pool's values; rotate_interval defaults
+    # to the global rotate_interval.
+    proxies:
+      urls:
+        - "http://gw-proxy-1.example.com:8080"
+        - "http://gw-proxy-2.example.com:8080"
+      # >=1 when present; omit for sticky. Here we rotate every 10 cycles.
+      rotate_interval: 10
+      max_errors: 3
+      cooldown: 1m
+
+    # Per-client-key rate limit for THIS provider only (overrides defaults).
+    # Must be >=1. 0 means unlimited (use 0 in defaults to mean "unlimited").
+    rate_limit_rpm: 600
+
+    # Tweak the retry budget for this provider.
+    retry:
+      max_attempts: 3
+
+  # -----------------------------------------------------------------------
+  # catchall — the fallback provider. At most ONE catch-all is allowed across
+  # the whole config, and its `models` MUST be exactly ["*"] (sole entry).
+  # -----------------------------------------------------------------------
+  catchall:
+    base_url: "https://fallback.example.com/v1"
+    keys:
+      - key: "sk-fallback-0000000000000000000000000000000000000000000001"
+    models:
+      - "*"
+
+
+# -----------------------------------------------------------------------------
+# persistence — durable key & proxy state across restarts (OPTIONAL)
+# -----------------------------------------------------------------------------
+# When set, Conflux saves key exhaustion/retirement and proxy circuit-breaker
+# state to this file and restores it on startup (matched by SHA256 key hash,
+# so a changed/removed/reordered key just skips its stale record). Writes are
+# debounced (1s) and atomic (temp file + rename, mode 0600); retirement-grade
+# changes flush immediately. Keys are stored as SHA256 hashes, never raw.
+#
+# The file format is inferred from the extension:
+#   .yaml / .yml → YAML         .json → JSON
+#
+# Omit this whole section (or set path: "") to disable persistence entirely.
+persistence:
+  path: "./state.yaml"
+  # Alternative: keep state as JSON instead.
+  # path: "./state.json"
