@@ -1,12 +1,12 @@
 {{define "content-overview"}}
 <div id="overview-region"
      hx-get="/_dashboard/partials/overview"
-     hx-trigger="every 5s"
+     hx-trigger="liveTick from:body"
      hx-swap="outerHTML">
   <div class="page-head">
     <div>
       <h2>Overview</h2>
-      <div class="sub">Live gateway health · auto-refreshes every 5s</div>
+      <div class="sub">Live gateway health · auto-refreshes every 2s (live mode)</div>
     </div>
     <div class="actions">
       <button class="btn primary sm"

@@ -1,5 +1,8 @@
 {{define "content-traces"}}
-<div id="traces-region">
+<div id="traces-region"
+     hx-get="/_dashboard/partials/traces{{if .PrevBefore}}?before={{.PrevBefore}}{{else if .NextBefore}}?before={{.NextBefore}}{{end}}"
+     hx-trigger="liveTick from:body"
+     hx-swap="outerHTML">
   <div class="page-head">
     <div>
       <h2>Request traces</h2>

@@ -15,37 +15,36 @@ type SSEError struct {
 
 // ClassifySSE probes a single parsed SSE data: payload that is already
 // JSON-decoded into a map, and classifies it per the SSE rules:
-//   - a key-specific 429 marker yields KEY_RATE_LIMITED, recorded with
+//   - a 429 status or rate-limit marker yields KEY_RATE_LIMITED, recorded with
 //     recordError;
 //   - an auth-fatal-shaped envelope, indicated by an embedded 401 or 403
 //     status or by an authentication_error, permission_error, or
 //     authentication type or code, yields KEY_AUTH_FATAL, recorded with
 //     markExhausted;
-//   - a shared or generic 429 yields SHARED_POOL_RATE_LIMITED, which is
-//     non-penalizing;
-//   - any other error yields a penalized recordError increment for a generic
-//     key error.
+//   - any other error yields UPSTREAM_OUTAGE.
 //
 // hasErrorEnvelope must be true: the caller has already confirmed an envelope.
 // The payload is the parsed JSON object from the data: line.
 func ClassifySSE(payload map[string]any) SSEError {
-	// Determine whether this is a key-specific 429, an auth-fatal envelope, or
-	// a shared or generic error.
 	hay := strings.ToLower(buildProbeString(payload))
 	hayStatus := sseStatus(payload)
 	hayType := strings.ToLower(sseTypeCode(payload))
 
 	switch {
-	case hasMarkerIn(hay, keySpecific429Markers):
-		return SSEError{IsError: true, Category: KeyRateLimited, Result: Result{Category: KeyRateLimited, Penalize: true, Retryable: true}}
 	case hayStatus == 401 || hayStatus == 403,
 		strings.Contains(hayType, "authentication_error"),
 		strings.Contains(hayType, "permission_error"),
 		strings.Contains(hayType, "authentication"):
 		return SSEError{IsError: true, Category: KeyAuthFatal, Result: Result{Category: KeyAuthFatal, Penalize: true, Retryable: true}}
-	case strings.Contains(hay, "rate limit") || strings.Contains(hay, "overloaded") || strings.Contains(hay, "throttl"):
-		// A shared or generic 429-like signal is non-penalizing.
-		return SSEError{IsError: true, Category: SharedPoolRateLimited, Result: Result{Category: SharedPoolRateLimited, Penalize: false, Retryable: true}}
+	case hayStatus == 429,
+		strings.Contains(hay, "rate_limit"),
+		strings.Contains(hay, "rate limit"),
+		strings.Contains(hay, "too many requests"),
+		strings.Contains(hay, "overloaded"),
+		strings.Contains(hay, "quota"),
+		strings.Contains(hay, "insufficient_quota"),
+		strings.Contains(hay, "throttl"):
+		return SSEError{IsError: true, Category: KeyRateLimited, Result: Result{Category: KeyRateLimited, Penalize: true, Retryable: true}}
 	default:
 		// Penalize is inert: forward.Do's UpstreamOutage branch handles it before applyConsequences.
 		return SSEError{IsError: true, Category: UpstreamOutage, Result: Result{Category: UpstreamOutage, Penalize: false, Retryable: true}}
@@ -137,6 +136,9 @@ func ParseSSEPayload(payload string) (map[string]any, bool) {
 		return obj, true
 	}
 	if t, ok := obj["type"].(string); ok && t == "error" {
+		return obj, true
+	}
+	if s := sseStatus(obj); s >= 400 {
 		return obj, true
 	}
 	return obj, false

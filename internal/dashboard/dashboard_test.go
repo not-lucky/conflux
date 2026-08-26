@@ -278,3 +278,41 @@ func readBody(t *testing.T, resp *http.Response) string {
 	}
 	return string(b)
 }
+
+// TestDashboardPartialsRender hits each partial endpoint and asserts it returns
+// 200 and the section content for 2s live updates.
+func TestDashboardPartialsRender(t *testing.T) {
+	d, _ := testDashboard(t, nil)
+	h := mounted(d)
+	c := authedClient(t, h)
+	for _, sec := range []string{"overview", "providers", "keys", "proxies", "breakers", "models", "traces"} {
+		resp := doGet(t, h, c, "/_dashboard/partials/"+sec)
+		body := readBody(t, resp)
+		resp.Body.Close()
+		if resp.StatusCode != http.StatusOK {
+			t.Errorf("partial %s status = %d body=%s", sec, resp.StatusCode, body)
+			continue
+		}
+		if !strings.Contains(body, sec+"-region") {
+			t.Errorf("partial %s body missing region wrapper: %s", sec, body)
+		}
+	}
+}
+
+// TestDashboardLiveModeLayout verifies the layout includes Live Mode toggle
+// widget and liveTick attributes.
+func TestDashboardLiveModeLayout(t *testing.T) {
+	d, _ := testDashboard(t, nil)
+	h := mounted(d)
+	c := authedClient(t, h)
+
+	resp := doGet(t, h, c, "/_dashboard/")
+	body := readBody(t, resp)
+	resp.Body.Close()
+
+	for _, want := range []string{"live-mode-toggle", "live-toggle-btn", "live-indicator", "liveTick"} {
+		if !strings.Contains(body, want) {
+			t.Errorf("layout missing %q in body: %s", want, body)
+		}
+	}
+}

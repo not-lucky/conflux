@@ -150,7 +150,7 @@ defaults:
 
   # Consecutive penalizing errors on a key before it exhausts (or retires, see
   # below). PENALIZED categories that count: KEY_RATE_LIMITED, KEY_AUTH_FATAL,
-  # KEY_BILLING. (Shared-pool 429, proxy errors, and upstream 5xx do NOT
+  # KEY_BILLING. (Proxy errors and upstream 5xx do NOT
   # penalize the key.) Must be >=1. Default: 5.
   max_errors: 5
 

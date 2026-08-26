@@ -83,7 +83,8 @@ func (d *Dashboard) Routes() http.Handler {
 	mux.HandleFunc("/assets/", d.handleAsset)
 	mux.HandleFunc("/login", d.handleLogin)
 	mux.HandleFunc("/logout", d.handleLogout)
-	mux.HandleFunc("/partials/overview", d.authGate(d.handleOverviewPartial))
+	mux.HandleFunc("/partials/", d.authGate(d.handlePartial))
+	mux.HandleFunc("/partials/overview", d.authGate(d.handlePartial))
 	mux.HandleFunc("/", d.authGate(d.handleDispatch))
 	return mux
 }
@@ -322,16 +323,41 @@ func (d *Dashboard) handleAction(w http.ResponseWriter, r *http.Request, action 
 	}
 }
 
-// handleOverviewPartial renders just the overview content for the 5s HTMX
-// poll, swapped into #overview-region.
-func (d *Dashboard) handleOverviewPartial(w http.ResponseWriter, r *http.Request) {
-	out, err := d.r.renderSection("overview", "Overview", d.buildSection("overview"))
+// handlePartial renders just the requested section content (e.g. for the 2s
+// live mode poll / swap into #<section>-region).
+func (d *Dashboard) handlePartial(w http.ResponseWriter, r *http.Request) {
+	section := strings.TrimPrefix(r.URL.Path, "/partials/")
+	section = strings.Trim(section, "/")
+	if section == "" {
+		section = "overview"
+	}
+	if section == "traces" {
+		before := r.URL.Query().Get("before")
+		data := d.buildTraces(before)
+		out, err := d.r.renderSection("traces", "Traces", data)
+		if err != nil {
+			http.Error(w, err.Error(), http.StatusInternalServerError)
+			return
+		}
+		w.Header().Set("Content-Type", "text/html; charset=utf-8")
+		_, _ = w.Write(out)
+		return
+	}
+	if !validSection(section) || section == "trace" {
+		http.NotFound(w, r)
+		return
+	}
+	out, err := d.r.renderSection(section, titleCase(section), d.buildSection(section))
 	if err != nil {
 		http.Error(w, err.Error(), http.StatusInternalServerError)
 		return
 	}
 	w.Header().Set("Content-Type", "text/html; charset=utf-8")
 	_, _ = w.Write(out)
+}
+
+func (d *Dashboard) handleOverviewPartial(w http.ResponseWriter, r *http.Request) {
+	d.handlePartial(w, r)
 }
 
 // validSection reports whether name maps to a rendered content template.

@@ -1,5 +1,8 @@
 {{define "content-models"}}
-<div id="models-region">
+<div id="models-region"
+     hx-get="/_dashboard/partials/models"
+     hx-trigger="liveTick from:body"
+     hx-swap="outerHTML">
   <div class="page-head">
     <div>
       <h2>Models</h2>

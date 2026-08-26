@@ -46,7 +46,7 @@ func (f *Forwarder) classifyAttempt(upResp *UpstreamResponse, err error, usedPro
 	})}
 }
 
-// bodyForClassify reads a small prefix of the body for 429 envelope probing.
+// bodyForClassify returns the buffered body for classification.
 // For SSE responses, where IsSSE is true, the body is the stream and is not
 // read for status-based classification: the SSE path handles its own
 // classification.

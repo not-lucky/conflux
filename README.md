@@ -82,7 +82,7 @@ state file on restart so a restart does not reset your pools.
 | **Proxies** | Global pool, per-provider pool override, per-key inline override; `http`, `https`, `socks5`, `socks5h`; rotation by cycle; per-URL circuit breaking |
 | **Resilience** | Per-provider upstream-5xx circuit breaker, retry loop with anti-drain guard, proxy network error failover, stream-retry budget |
 | **SSE** | First-chunk error peek, in-stream error detection, `[DONE]` handling, partial-line re-injection |
-| **Error classification** | Success, Redirect, SharedPoolRateLimited, KeyRateLimited, KeyAuthFatal, KeyBilling, UpstreamOutage, ClientError, ProxyNetworkError, UnknownError — each with penalize/retryable semantics |
+| **Error classification** | Success, Redirect, KeyRateLimited, KeyAuthFatal, KeyBilling, UpstreamOutage, ClientError, ProxyNetworkError, UnknownError — each with penalize/retryable semantics |
 | **Fallbacks** | `fallback_models` maps one model id to another, re-serialized into the body |
 | **Rate limiting** | Per-client-key 60s sliding window, 10k LRU, idle-first eviction |
 | **Persistence** | State file (YAML or JSON), debounced flush, immediate flush on retirement, SHA256 key hashing, cross-restart restore |
@@ -606,10 +606,8 @@ ultimately to direct. Rotation shifts the slot→proxy mapping every
 `PROXY_NETWORK_ERROR` retries reuse the same key through a different proxy.
 
 **Classification** turns each upstream outcome into a `Category` with
-`Penalize` and `Retryable` flags — e.g. a 429 with a key-specific marker
-(`rate_limit_exceeded`, `api key`, `organization`, …) is `KEY_RATE_LIMITED`
-(penalize, retry on a new key), while a bare 429 is `SHARED_POOL_RATE_LIMITED`
-(no penalty). A 402 is `KEY_BILLING`; 5xx is `UPSTREAM_OUTAGE` (breaker-gated);
+`Penalize` and `Retryable` flags — e.g. a 429 is `KEY_RATE_LIMITED`
+(penalize, retry on a new key); a 402 is `KEY_BILLING`; 5xx is `UPSTREAM_OUTAGE` (breaker-gated);
 a transport failure is `PROXY_NETWORK_ERROR` (penalize the proxy, not the
 key).
 

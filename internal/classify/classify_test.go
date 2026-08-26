@@ -42,20 +42,19 @@ func TestClassify429(t *testing.T) {
 		body string
 		want Category
 	}{
-		// Key-specific markers (any provider).
+		// Any 429 is treated as KeyRateLimited
 		{"openai rate_limit_exceeded", `{"error":{"type":"rate_limit_exceeded"}}`, KeyRateLimited},
 		{"openai quota", `{"error":{"message":"insufficient_quota"}}`, KeyRateLimited},
 		{"anthropic overloaded", `{"error":{"type":"overloaded"}}`, KeyRateLimited},
 		{"per-key phrase", `{"error":{"message":"your api key rate limit reached"}}`, KeyRateLimited},
-		// Shared pool (no key-specific marker).
-		{"generic 429", `{"error":{"message":"slow down"}}`, SharedPoolRateLimited},
-		{"empty body", ``, SharedPoolRateLimited},
-		{"unparseable", `not json`, SharedPoolRateLimited},
+		{"generic 429", `{"error":{"message":"slow down"}}`, KeyRateLimited},
+		{"empty body", ``, KeyRateLimited},
+		{"unparseable", `not json`, KeyRateLimited},
 	}
 	for _, c := range cases {
 		got := Classify(Response{Status: 429, Body: []byte(c.body)})
-		if got.Category != c.want {
-			t.Errorf("case %q: got %s, want %s", c.name, got.Category, c.want)
+		if got.Category != c.want || !got.Penalize || !got.Retryable {
+			t.Errorf("case %q: got %+v, want %s (penalize=true, retryable=true)", c.name, got, c.want)
 		}
 	}
 }
@@ -118,7 +117,9 @@ func TestClassifySSE(t *testing.T) {
 		{"auth-fatal status", `{"error":{"status":401,"message":"invalid key"}}`, KeyAuthFatal},
 		{"auth-fatal type", `{"error":{"type":"authentication_error"}}`, KeyAuthFatal},
 		{"permission error", `{"error":{"type":"permission_error"}}`, KeyAuthFatal},
-		{"shared rate limit", `{"error":{"message":"rate limit shared"}}`, SharedPoolRateLimited},
+		{"shared rate limit", `{"error":{"message":"rate limit shared"}}`, KeyRateLimited},
+		{"shared 429 status", `{"error":{"status":429,"message":"too many requests"}}`, KeyRateLimited},
+		{"shared 429 code string", `{"error":{"code":"429","message":"slow down"}}`, KeyRateLimited},
 		{"generic error", `{"error":{"message":"internal"}}`, UpstreamOutage},
 	}
 	for _, c := range cases {
@@ -130,5 +131,23 @@ func TestClassifySSE(t *testing.T) {
 		if !res.IsError || res.Category != c.want {
 			t.Errorf("case %q: got %s, want %s", c.name, res.Category, c.want)
 		}
+	}
+}
+
+func TestCategoryIsError(t *testing.T) {
+	if Success.IsError() {
+		t.Error("Success should not be an error")
+	}
+	if Redirect.IsError() {
+		t.Error("Redirect should not be an error")
+	}
+	if !SharedPoolRateLimited.IsError() {
+		t.Error("SharedPoolRateLimited should be marked as an error")
+	}
+	if !KeyRateLimited.IsError() {
+		t.Error("KeyRateLimited should be marked as an error")
+	}
+	if !UpstreamOutage.IsError() {
+		t.Error("UpstreamOutage should be marked as an error")
 	}
 }

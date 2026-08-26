@@ -22,8 +22,20 @@
         <a href="/_dashboard/{{.Path}}" class="{{if eq .Path $active}}active{{end}}">{{svg .Icon}} <span>{{.Label}}</span></a>
         {{end}}
       </nav>
+      <div class="sidebar-footer">
+        <div class="live-toggle" id="live-toggle-btn" role="button" tabindex="0" title="Toggle Live Mode (2s auto-refresh)">
+          <div class="live-status">
+            <span class="live-dot" id="live-indicator"></span>
+            <span class="live-text">Live Mode <span class="live-badge">2s</span></span>
+          </div>
+          <label class="switch" onclick="event.stopPropagation()" title="Toggle 2s Live Mode">
+            <input type="checkbox" id="live-mode-toggle" checked>
+            <span class="slider"></span>
+          </label>
+        </div>
+      </div>
     </aside>
-    <main class="main">
+    <main class="main" id="main-region" data-section="{{if .Active}}{{.Active}}{{else}}overview{{end}}">
       {{.Body}}
     </main>
   </div>

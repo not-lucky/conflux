@@ -1,5 +1,8 @@
 {{define "content-breakers"}}
-<div id="breakers-region">
+<div id="breakers-region"
+     hx-get="/_dashboard/partials/breakers"
+     hx-trigger="liveTick from:body"
+     hx-swap="outerHTML">
   <div class="page-head">
     <div>
       <h2>Circuit breakers</h2>

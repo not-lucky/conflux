@@ -8,11 +8,13 @@
 package trace
 
 import (
+	"encoding/base64"
 	"encoding/json"
 	"net/http"
 	"os"
 	"path/filepath"
 	"sort"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -130,34 +132,56 @@ func (s TraceSummary) DurationMs() int64 {
 	return 0
 }
 
-// ListTraces returns the names of all trace directories under root/trace,
-// sorted newest-first (reverse lexicographic — dir names are timestamp-
-// prefixed, so this is chronological newest-first). It does not read the
-// directory contents; pair each name with ReadTraceSummary for metadata.
-// Returns nil when the trace directory does not exist yet.
+// ListTraces returns the names of all trace directories under root/trace and
+// root/error, sorted newest-first (reverse lexicographic — dir names are
+// timestamp-prefixed, so this is chronological newest-first). It does not read
+// the directory contents; pair each name with ReadTraceSummary for metadata.
+// Returns nil when neither directory exists.
 func (t *Tracer) ListTraces() []string {
-	entries, err := os.ReadDir(filepath.Join(t.root, "trace"))
-	if err != nil {
-		return nil
-	}
-	names := make([]string, 0, len(entries))
-	for _, e := range entries {
-		if e.IsDir() {
-			names = append(names, e.Name())
+	seen := map[string]bool{}
+	var names []string
+	for _, sub := range []string{"trace", "error"} {
+		entries, err := os.ReadDir(filepath.Join(t.root, sub))
+		if err != nil {
+			continue
 		}
+		for _, e := range entries {
+			if e.IsDir() && !seen[e.Name()] {
+				seen[e.Name()] = true
+				names = append(names, e.Name())
+			}
+		}
+	}
+	if len(names) == 0 {
+		return nil
 	}
 	sort.Sort(sort.Reverse(sort.StringSlice(names)))
 	return names
 }
 
-// ReadTraceSummary loads meta.json (success path) or, failing that,
-// error.json (failure path) for one trace directory. Returns a TraceSummary
-// with the appropriate field set, or a TraceSummary with only Dir populated
-// when neither file exists or can be decoded (the caller degrades gracefully).
+// isErrorCategory reports whether the category string represents an error outcome.
+func isErrorCategory(cat string) bool {
+	if cat == "" || cat == "SUCCESS" || cat == "REDIRECT" {
+		return false
+	}
+	if n, err := strconv.Atoi(cat); err == nil {
+		return n >= 400
+	}
+	return true
+}
+
+// ReadTraceSummary loads meta.json or error.json for one trace directory.
+// Returns a TraceSummary with Outcome set to "error" for failures and "ok" for
+// successes, or a TraceSummary with only Dir populated when neither file exists
+// or can be decoded.
 func (t *Tracer) ReadTraceSummary(dir string) TraceSummary {
 	sum := TraceSummary{Dir: dir}
 	if m := readJSONFile[Meta](filepath.Join(t.root, "trace", dir, "meta.json")); m != nil {
-		sum.Outcome = "ok"
+		if isErrorCategory(m.Category) {
+			sum.Outcome = "error"
+		} else {
+			sum.Outcome = "ok"
+		}
 		sum.Meta = m
 		return sum
 	}
@@ -171,9 +195,14 @@ func (t *Tracer) ReadTraceSummary(dir string) TraceSummary {
 // ListTraceFiles returns the file names inside one trace directory, sorted
 // lexicographically. Returns nil when the directory does not exist.
 func (t *Tracer) ListTraceFiles(dir string) []string {
-	entries, err := os.ReadDir(filepath.Join(t.root, "trace", dir))
-	if err != nil {
-		return nil
+	traceDir := filepath.Join(t.root, "trace", dir)
+	entries, err := os.ReadDir(traceDir)
+	if err != nil || len(entries) == 0 {
+		traceDir = filepath.Join(t.root, "error", dir)
+		entries, err = os.ReadDir(traceDir)
+		if err != nil {
+			return nil
+		}
 	}
 	files := make([]string, 0, len(entries))
 	for _, e := range entries {
@@ -187,14 +216,19 @@ func (t *Tracer) ListTraceFiles(dir string) []string {
 
 // ReadTraceFile reads one file from a trace directory for the dashboard viewer.
 // Large files (notably response.stream) are truncated to a 256 KiB preview
-// with a notice. JSON files are pretty-printed. Read errors return a
+// with a notice. JSON files are pretty-printed and any stringified JSON
+// bodies are unpacked and formatted. Read errors return a
 // human-readable placeholder instead of propagating, since the viewer degrades
 // gracefully.
 func (t *Tracer) ReadTraceFile(dir, name string) string {
 	path := filepath.Join(t.root, "trace", dir, name)
 	b, err := os.ReadFile(path)
 	if err != nil {
-		return "(could not read " + name + ")"
+		path = filepath.Join(t.root, "error", dir, name)
+		b, err = os.ReadFile(path)
+		if err != nil {
+			return "(could not read " + name + ")"
+		}
 	}
 	const preview = 256 * 1024 // 256 KiB preview
 	if len(b) > preview {
@@ -203,11 +237,54 @@ func (t *Tracer) ReadTraceFile(dir, name string) string {
 	if strings.HasSuffix(name, ".json") {
 		var v any
 		if err := json.Unmarshal(b, &v); err == nil {
-			enc, _ := json.MarshalIndent(v, "", "  ")
-			return string(enc)
+			v = formatJSONTree(v)
+			enc, err := json.MarshalIndent(v, "", "  ")
+			if err == nil {
+				return string(enc)
+			}
 		}
 	}
 	return string(b)
+}
+
+// formatJSONTree recursively inspects JSON structures and unpacks any
+// stringified or base64-encoded JSON values (e.g. stringified request bodies)
+// into structured objects so they are pretty-printed properly.
+func formatJSONTree(v any) any {
+	switch val := v.(type) {
+	case map[string]any:
+		for k, child := range val {
+			if str, ok := child.(string); ok {
+				s := strings.TrimSpace(str)
+				if (strings.HasPrefix(s, "{") && strings.HasSuffix(s, "}")) || (strings.HasPrefix(s, "[") && strings.HasSuffix(s, "]")) {
+					var parsed any
+					if err := json.Unmarshal([]byte(s), &parsed); err == nil {
+						val[k] = formatJSONTree(parsed)
+						continue
+					}
+				}
+				if b64, err := base64.StdEncoding.DecodeString(s); err == nil && len(b64) > 0 {
+					s2 := strings.TrimSpace(string(b64))
+					if (strings.HasPrefix(s2, "{") && strings.HasSuffix(s2, "}")) || (strings.HasPrefix(s2, "[") && strings.HasSuffix(s2, "]")) {
+						var parsed any
+						if err := json.Unmarshal([]byte(s2), &parsed); err == nil {
+							val[k] = formatJSONTree(parsed)
+							continue
+						}
+					}
+				}
+			}
+			val[k] = formatJSONTree(child)
+		}
+		return val
+	case []any:
+		for i, elem := range val {
+			val[i] = formatJSONTree(elem)
+		}
+		return val
+	default:
+		return v
+	}
 }
 
 // readJSONFile decodes a JSON file into T, returning nil on any read/decode
@@ -259,20 +336,32 @@ func (t *Tracer) Open(id string) *Span {
 	return s
 }
 
+// parseBodyForTrace parses raw request bytes as JSON if valid, or returns a
+// truncated 64 KiB string if non-JSON.
+func parseBodyForTrace(raw []byte) any {
+	if len(raw) == 0 {
+		return ""
+	}
+	var parsed any
+	if err := json.Unmarshal(raw, &parsed); err == nil {
+		return parsed
+	}
+	if len(raw) > 64*1024 {
+		raw = raw[:64*1024]
+	}
+	return string(raw)
+}
+
 // WriteRequest writes request.json (redacted) to the trace dir.
 func (s *Span) WriteRequest(info RequestInfo) {
 	if s.dir == "" {
 		return
 	}
-	body := info.Body
-	if len(body) > 64*1024 {
-		body = body[:64*1024]
-	}
 	rec := map[string]any{
 		"method":   info.Method,
 		"url":      redact.QueryValues(info.URL),
 		"headers":  redact.Headers(info.Headers),
-		"body":     string(body),
+		"body":     parseBodyForTrace(info.Body),
 		"model":    info.Model,
 		"provider": info.Provider,
 	}
@@ -291,6 +380,12 @@ func (s *Span) WriteResponseHeaders(h http.Header) {
 func (s *Span) WriteResponseJSON(body []byte) {
 	if s.dir == "" {
 		return
+	}
+	var v any
+	if len(body) > 0 && json.Unmarshal(body, &v) == nil {
+		if formatted, err := json.MarshalIndent(v, "", "  "); err == nil {
+			body = formatted
+		}
 	}
 	_ = os.WriteFile(filepath.Join(s.dir, "response.json"), body, 0o644)
 }
@@ -340,6 +435,16 @@ func (s *Span) WriteError(e ErrorInfo) {
 	dir := filepath.Join(s.tracer.root, "error", ts)
 	if err := os.MkdirAll(dir, 0o755); err != nil {
 		return
+	}
+	if reqInfo, ok := e.Request.(RequestInfo); ok {
+		e.Request = map[string]any{
+			"method":   reqInfo.Method,
+			"url":      redact.QueryValues(reqInfo.URL),
+			"headers":  redact.Headers(reqInfo.Headers),
+			"body":     parseBodyForTrace(reqInfo.Body),
+			"model":    reqInfo.Model,
+			"provider": reqInfo.Provider,
+		}
 	}
 	s.writeJSON(filepath.Join(dir, "error.json"), e)
 }

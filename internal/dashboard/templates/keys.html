@@ -1,5 +1,8 @@
 {{define "content-keys"}}
-<div id="keys-region">
+<div id="keys-region"
+     hx-get="/_dashboard/partials/keys"
+     hx-trigger="liveTick from:body"
+     hx-swap="outerHTML">
   <div class="page-head">
     <div>
       <h2>Key pools</h2>

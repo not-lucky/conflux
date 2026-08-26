@@ -483,12 +483,12 @@ const (
 // section's UpstreamOutage block. applyConsequences is only reached for the
 // non-UpstreamOutage penalized and
 // non-penalized categories (KeyAuthFatal, KeyRateLimited, KeyBilling,
-// SharedPoolRateLimited, ProxyNetworkError), matching the JSON path's fall-
+// ProxyNetworkError), matching the JSON path's fall-
 // through below the UpstreamOutage and Success blocks.
 func applyConsequences(ph ProviderHandle, sel Selection, res attemptResult, upResp *UpstreamResponse, triedKeys map[int]bool, antiDrain func(string) bool) consequence {
 	if !res.Penalize {
-		// SharedPoolRateLimited and other non-penalizing categories: no
-		// triedKeys, no key penalty. ProxyNetworkError is non-penalizing too.
+		// Non-penalizing categories (e.g. ProxyNetworkError): no
+		// triedKeys, no key penalty.
 		return consequenceContinue
 	}
 	triedKeys[sel.KeyNumber] = true

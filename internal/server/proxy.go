@@ -279,6 +279,10 @@ func (s *Server) finishSuccess(sf successFinish) {
 	}
 	injectConfluxHeaders(sf.w, sf.prov, sf.resp, sf.expose)
 	copyResponse(sf.w, sf.r, sf.resp)
+	category := sf.resp.Category
+	if category == "" {
+		category = strconv.Itoa(sf.resp.Status)
+	}
 	sf.span.WriteMeta(trace.Meta{
 		Provider:    sf.prov,
 		Model:       sf.resp.Model,
@@ -287,9 +291,21 @@ func (s *Server) finishSuccess(sf successFinish) {
 		ProxyNumber: sf.resp.ProxyNumber,
 		DurationMs:  dur,
 		Timestamp:   now,
-		Category:    strconv.Itoa(sf.resp.Status),
+		Category:    category,
 		Attempt:     sf.resp.AttemptCount,
 	})
+	if sf.resp.Status >= 400 {
+		sf.span.WriteError(trace.ErrorInfo{
+			Provider:    sf.prov,
+			Model:       sf.resp.Model,
+			KeyNumber:   sf.resp.KeyNumber,
+			Proxy:       sf.resp.ProxyURL,
+			ProxyNumber: sf.resp.ProxyNumber,
+			Error:       category,
+			DurationMs:  dur,
+			Timestamp:   now,
+		})
+	}
 	s.Metrics.RecordRequest(sf.prov, sf.resp.Model, sf.resp.Status)
 	s.Metrics.RecordDuration(sf.prov, float64(dur))
 }

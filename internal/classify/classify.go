@@ -4,13 +4,12 @@
 // classify is a leaf package of pure functions with no I/O and no internal
 // imports. Its interface is Classify(resp) Result for HTTP responses and
 // ClassifySSE for SSE error envelopes. The package owns the full
-// classification behavior: evaluation order, the 429 key-specific versus
-// shared-pool split, envelope JSONPath probing, the transport-error string
-// set, the 402 versus 401/403 split, and redirect handling.
+// classification behavior: evaluation order, 429 rate-limiting, envelope
+// JSONPath probing, the transport-error string set, the 402 versus 401/403
+// split, and redirect handling.
 package classify
 
 import (
-	"encoding/json"
 	"strings"
 )
 
@@ -56,6 +55,11 @@ func (c Category) String() string {
 	return "UNKNOWN_ERROR"
 }
 
+// IsError reports whether the Category represents an error outcome.
+func (c Category) IsError() bool {
+	return c != Success && c != Redirect
+}
+
 // Result is the outcome of classification.
 type Result struct {
 	Category  Category
@@ -95,7 +99,7 @@ func Classify(resp Response) Result {
 	case resp.Status == 301, resp.Status == 302, resp.Status == 303, resp.Status == 307, resp.Status == 308:
 		return Result{Category: Redirect} // forwarded, not followed
 	case resp.Status == 429:
-		return classify429(resp.Body)
+		return Result{Category: KeyRateLimited, Penalize: true, Retryable: true}
 	case resp.Status == 401, resp.Status == 403:
 		return Result{Category: KeyAuthFatal, Penalize: true, Retryable: true}
 	case resp.Status == 402:
@@ -109,55 +113,6 @@ func Classify(resp Response) Result {
 		// forwarded immediately.
 		return Result{Category: UnknownError}
 	}
-}
-
-// classify429 splits 429 responses into KEY_RATE_LIMITED when a key-specific
-// marker is present and SHARED_POOL_RATE_LIMITED otherwise. The default is
-// non-penalizing.
-func classify429(body []byte) Result {
-	if hasKeySpecific429Marker(body) {
-		return Result{Category: KeyRateLimited, Penalize: true, Retryable: true}
-	}
-	return Result{Category: SharedPoolRateLimited, Penalize: false, Retryable: true}
-}
-
-// keySpecific429Markers is the canonical marker set, lowercased. The markers
-// are probed against the concatenated message, raw, limit_source, error.type,
-// and error.code fields.
-var keySpecific429Markers = []string{
-	"rate_limit_exceeded",
-	"rate_limit_error",
-	"quota",
-	"insufficient_quota",
-	"billing_hard_limit_reached",
-	"overloaded",
-	"your account", // "your account ... rate limit"
-	"api key",      // "api key ... rate limit"
-	"per-key", "per_key",
-	"organization", // "organization ... rate limit"
-}
-
-// hasKeySpecific429Marker probes the 429 body for the canonical key-specific
-// markers. A 429 that parses as JSON but matches none is shared-pool; an
-// unparseable or empty body is shared-pool too, which is the default-safe
-// stance.
-func hasKeySpecific429Marker(body []byte) bool {
-	if len(body) == 0 {
-		return false
-	}
-	var raw map[string]any
-	if err := json.Unmarshal(body, &raw); err != nil {
-		return false // an unparseable body is treated as shared pool.
-	}
-	// Build the concatenated probe string from the envelope-shape fields.
-	hay := buildProbeString(raw)
-	hayLower := strings.ToLower(hay)
-	for _, m := range keySpecific429Markers {
-		if strings.Contains(hayLower, m) {
-			return true
-		}
-	}
-	return false
 }
 
 // buildProbeString extracts the envelope-shape fields and concatenates them
