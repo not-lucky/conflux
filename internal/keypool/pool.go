@@ -2,8 +2,10 @@
 // selection, round-robin and sticky modes, key health, and exhaustion or
 // retirement.
 //
-// keypool is a near-leaf package that imports only the standard library and
-// redact for masked snapshots. Its interface is small: Select, RecordSuccess,
+// keypool is a leaf package that imports only the standard library and an
+// internal clock package. It never sees raw key material in masked form —
+// redaction is the dashboard's job, applied over Snapshot output — so it has
+// no dependency on redact. Its interface is small: Select, RecordSuccess,
 // RecordError, MarkExhausted, and Snapshot. All of the key pool behavior
 // (active window plus FIFO standby promotion, requests_per_key counters,
 // lazy cooldown re-entry, and the anti-drain guard) lives behind it.
@@ -20,13 +22,14 @@ import (
 // Spec configures a pool. The fields mirror the resolved config provider
 // fields.
 type Spec struct {
-	Keys               []Key
-	Mode               string // "round_robin" or "sticky"
-	RequestsPerKey     int    // ignored when Mode is "sticky"
-	ActiveWindow       int    // 0 means all healthy
-	MaxErrors          int
-	Cooldown           time.Duration
-	RetireOnExhaustion bool
+	Keys                  []Key
+	Mode                  string // "round_robin" or "sticky"
+	RequestsPerKey        int    // ignored when Mode is "sticky"
+	ActiveWindow          int    // configured value; 0 means "all keys". Kept for snapshots.
+	EffectiveActiveWindow int    // resolved window (0=>len(Keys), clamp), read by the pool.
+	MaxErrors             int
+	Cooldown              time.Duration
+	RetireOnExhaustion    bool
 }
 
 // Key is one provider key, with a value and an optional inline proxy.
@@ -67,6 +70,17 @@ func New(spec Spec, clk clock.Clock) *Pool {
 	if clk == nil {
 		clk = clock.RealClock{}
 	}
+	// Normalize EffectiveActiveWindow for direct construction (tests, ad-hoc
+	// callers): the 0=>len(Keys) rule. In production, config.resolve bakes this
+	// value once and app passes it in, so this is a defensive fallback, not the
+	// authoritative derivation. ActiveWindow==0 also means "all keys".
+	if spec.EffectiveActiveWindow == 0 {
+		w := spec.ActiveWindow
+		if w == 0 || w > len(spec.Keys) {
+			w = len(spec.Keys)
+		}
+		spec.EffectiveActiveWindow = w
+	}
 	n := len(spec.Keys)
 	return &Pool{
 		clock:             clk,
@@ -78,13 +92,11 @@ func New(spec Spec, clk clock.Clock) *Pool {
 	}
 }
 
-// activeWindow returns the configured window size (clamped to len(keys)).
+// activeWindow returns the effective active window size. The config layer
+// resolves the "0 means all keys" rule and the len(keys) clamp once into
+// EffectiveActiveWindow, so the pool reads the baked value directly.
 func (p *Pool) activeWindow() int {
-	w := p.spec.ActiveWindow
-	if w == 0 || w > len(p.spec.Keys) {
-		return len(p.spec.Keys)
-	}
-	return w
+	return p.spec.EffectiveActiveWindow
 }
 
 // Selection is the result of Select.
@@ -325,6 +337,23 @@ type KeyState struct {
 	ExhaustedAt       time.Time // zero means not exhausted
 	Retired           bool
 	RetiredAt         time.Time
+}
+
+// Classify returns the display state of a key snapshot: "retired",
+// "exhausted", or "active". This is the single canonical statement of the
+// rule — the same rule isHealthyLocked applies to live pool slots — so callers
+// like the dashboard derive the label from one place instead of re-implementing
+// the cooldown comparison. exhausted is reported while the key is still within
+// its cooldown (now - ExhaustedAt < cooldown); past cooldown it re-enters as
+// active (lazy re-entry).
+func Classify(ks KeyState, cooldown time.Duration, now time.Time) string {
+	if ks.Retired {
+		return "retired"
+	}
+	if !ks.ExhaustedAt.IsZero() && now.Sub(ks.ExhaustedAt) < cooldown {
+		return "exhausted"
+	}
+	return "active"
 }
 
 // Snapshot is the pool state for persistence and /_status.

@@ -25,7 +25,7 @@ import (
 	"net/http"
 	"strconv"
 	"strings"
-	"time"
+	"sync"
 
 	"github.com/not-lucky/conflux/internal/classify"
 	"github.com/not-lucky/conflux/internal/stream"
@@ -61,11 +61,6 @@ type Response struct {
 	ModelOriginal   string // original model, set when a fallback rewrite occurred
 	AttemptCount    int
 	DownstreamError error // terminal error to translate to a status and body
-	// StreamKeepalive and StreamIdleTimeout carry the provider's stream
-	// settings to the server so it can pass them to stream.Pipe. Zero for
-	// non-streaming responses.
-	StreamKeepalive   time.Duration
-	StreamIdleTimeout time.Duration
 	// Category is the canonical classification string for every terminal
 	// outcome. Classified outcomes use classify.Category.String() (e.g.
 	// "SUCCESS", "UPSTREAM_OUTAGE", "KEY_AUTH_FATAL"); forward-level conditions
@@ -87,25 +82,21 @@ type UpstreamRequest struct {
 	Body    []byte
 	// ViaProxy is the resolved proxy URL; an empty string means direct.
 	ViaProxy string
-	// TTFB is the per-attempt response-header deadline.
-	TTFB time.Duration
-	// SSE indicates the client expects streaming, which sets the idle watchdog
-	// on the Doer.
-	SSE         bool
-	IdleTimeout time.Duration
+	// SSE indicates the client expects streaming.
+	SSE bool
 }
 
 // UpstreamResponse is what the Doer returns. For SSE, Body is the stream and
-// IsSSE is true; the headers have already been received.
+// IsSSE is true; the headers have already been received. Transport errors
+// (dial/TTFB) are returned as a non-nil error alongside a nil response — the
+// error message flows through classify via classify.Response.TransportErr, not
+// via this struct — so there is no TransportErr field here.
 type UpstreamResponse struct {
 	Status  int
 	Headers http.Header
 	Body    io.ReadCloser
 	BodyBuf []byte // buffered JSON body for classification (JSON responses)
 	IsSSE   bool
-	// TransportErr is set when the fetch threw before headers (dial or TTFB).
-	// The error message is used by classify for PROXY_NETWORK_ERROR.
-	TransportErr string
 }
 
 // Forwarder orchestrates one request through selection, rewrite, the Doer,
@@ -128,39 +119,53 @@ type ProviderLookup interface {
 // ProviderPolicy bundles a provider's resolved policy fields. It is returned
 // by ProviderHandle.Policy so the forwarder reads policy without 10 getters.
 type ProviderPolicy struct {
-	Name              string
-	BaseURL           string
-	MaxAttempts       int // 0 means compute the default, which forward resolves
-	ActiveWindowSize  int // used to compute the default
-	MaxStreamRetries  int
-	RequestTimeout    time.Duration
-	StreamIdleTimeout time.Duration
-	KeepaliveInterval time.Duration
-	RequestDeadline   time.Duration
-	FallbackModels    map[string]string
+	Name             string
+	BaseURL          string
+	MaxAttempts      int // 0 means compute the default, which forward resolves
+	ActiveWindowSize int // used to compute the default
+	MaxStreamRetries int
+	FallbackModels   map[string]string
 }
 
 // ProviderHandle is the per-provider runtime seam: it exposes the key pool,
-// proxy resolver, breaker, and policy to the forwarder through an explicit
-// interface contract instead of a bag of callbacks. The app builds one
+// proxy resolver, breaker, and policy to the forwarder as three focused ports
+// plus a Policy accessor, instead of a bag of callbacks. The app builds one
 // concrete handle per provider at Build time (not per request); per-request
 // state such as anti-drain and triedKeys lives in the Forwarder.Do stack
 // frame, not on the handle.
 type ProviderHandle interface {
-	// Policy returns the resolved provider policy.
 	Policy() ProviderPolicy
+	KeySource
+	ProxyResolver
+	Breaker
+}
+
+// KeySource is the key-pool lifecycle port: select a key for an attempt and
+// record the outcome (success, recoverable error, or terminal exhaustion).
+// All methods take the 1-based key number from Selection.KeyNumber.
+type KeySource interface {
 	// Select picks a key, keyNumber, and slotIndex for the next attempt.
 	Select() (Selection, error)
 	RecordSuccess(keyNumber int)
 	RecordError(keyNumber int) RecordResult
 	MarkExhausted(keyNumber int)
+}
+
+// ProxyResolver is the proxy resolution and health port: resolve the proxy
+// for a given attempt's slot, and record proxy outcomes (error, last-error
+// message, or success) for health tracking.
+type ProxyResolver interface {
 	// ResolveProxy resolves the proxy for a given slot. sel is the current
 	// selection so the resolver can read the inline proxy from sel.Proxy.
 	ResolveProxy(slotIndex, cycleCount int, sel Selection) ProxySelection
 	RecordProxyError(url string)
 	SetProxyLastError(url, msg string)
 	RecordProxySuccess(url string)
-	// Breaker consult and update for upstream 5xx.
+}
+
+// Breaker is the circuit-breaker port: consult whether the breaker is open
+// (skip retrying upstream 5xx) and record 5xx/2xx outcomes to trip or reset it.
+type Breaker interface {
 	BreakerOpen() bool
 	BreakerOn5xx() bool
 	BreakerOn2xx()
@@ -217,13 +222,13 @@ func (f *Forwarder) Do(ctx context.Context, req *Request) (*Response, error) {
 		return false
 	}
 
-	// End-to-end deadline from admission.
-	deadline := policy.RequestDeadline
-	if deadline <= 0 {
-		deadline = 180 * time.Second
-	}
-	rctx, cancel := context.WithTimeout(ctx, deadline)
-	defer cancel()
+	rctx, rcancel := context.WithCancel(ctx)
+	streamReturned := false
+	defer func() {
+		if !streamReturned {
+			rcancel()
+		}
+	}()
 
 	maxAttempts := policy.MaxAttempts
 	if maxAttempts <= 0 {
@@ -247,7 +252,7 @@ func (f *Forwarder) Do(ctx context.Context, req *Request) (*Response, error) {
 	var lastCat category = UnknownError
 
 	for attempt := 1; attempt <= maxAttempts; attempt++ {
-		// Check the deadline before each attempt.
+		// Check context cancellation before each attempt.
 		if err := rctx.Err(); err != nil {
 			break
 		}
@@ -274,14 +279,16 @@ func (f *Forwarder) Do(ctx context.Context, req *Request) (*Response, error) {
 			continue
 		}
 		upReq.ViaProxy = psel.URL
-		upReq.TTFB = policy.RequestTimeout
-		upReq.IdleTimeout = policy.StreamIdleTimeout
 		upReq.SSE = isSSERequest(req.Headers)
 
 		// Per-attempt context bounded by the remaining deadline.
 		attCtx, attCancel := context.WithCancel(rctx)
 		upResp, err := f.Doer.Do(attCtx, upReq)
-		attCancel()
+		if upResp != nil && upResp.IsSSE && upResp.Body != nil {
+			upResp.Body = &cancelOnClose{ReadCloser: upResp.Body, cancel: attCancel}
+		} else {
+			attCancel()
+		}
 
 		// Classify. For SSE, peek the first chunk FIRST so res is the real
 		// (reclassified) result — the same attemptResult the JSON path uses.
@@ -316,8 +323,6 @@ func (f *Forwarder) Do(ctx context.Context, req *Request) (*Response, error) {
 				msg := ""
 				if err != nil {
 					msg = err.Error()
-				} else if upResp != nil && upResp.TransportErr != "" {
-					msg = upResp.TransportErr
 				}
 				ph.SetProxyLastError(psel.URL, msg)
 			} else if err == nil {
@@ -328,16 +333,21 @@ func (f *Forwarder) Do(ctx context.Context, req *Request) (*Response, error) {
 		// UpstreamOutage (UNIFIED).
 		if res.Category == UpstreamOutage {
 			if ph.BreakerOpen() {
-				return f.buildResponse(req, ph, sel, psel, effModel, rewrote, upResp, attempt, res, chunk), nil
+				resp := f.buildResponse(req, ph, sel, psel, effModel, rewrote, upResp, attempt, res, chunk, rcancel)
+				if resp.Stream {
+					streamReturned = true
+				}
+				return resp, nil
 			}
 			ph.BreakerOn5xx()
-			if upResp != nil && upResp.IsSSE {
-				upResp.Body.Close()
-			}
 			lastErr = errors.New("upstream 5xx")
 			lastCat = res.Category
-			if upResp != nil && upResp.IsSSE && !sseStreamBudget(maxAttempts, attempt, policy.MaxStreamRetries, streamRetries) {
-				return f.buildResponse(req, ph, sel, psel, effModel, rewrote, upResp, attempt, res, chunk), nil
+			if f.sseRetryDecision(upResp, maxAttempts, attempt, policy.MaxStreamRetries, streamRetries) {
+				resp := f.buildResponse(req, ph, sel, psel, effModel, rewrote, upResp, attempt, res, chunk, rcancel)
+				if resp.Stream {
+					streamReturned = true
+				}
+				return resp, nil
 			}
 			continue
 		}
@@ -346,22 +356,35 @@ func (f *Forwarder) Do(ctx context.Context, req *Request) (*Response, error) {
 		if res.Category == Success {
 			ph.BreakerOn2xx()
 			ph.RecordSuccess(sel.KeyNumber)
-			return f.buildResponse(req, ph, sel, psel, effModel, rewrote, upResp, attempt, res, chunk), nil
+			resp := f.buildResponse(req, ph, sel, psel, effModel, rewrote, upResp, attempt, res, chunk, rcancel)
+			if resp.Stream {
+				streamReturned = true
+			}
+			return resp, nil
 		}
 
 		// Penalized / non-penalized (UNIFIED — the existing fall-through,
 		// now used by SSE too).
 		if applyConsequences(ph, sel, res, upResp, triedKeys, antiDrain) == consequenceForward {
-			return f.buildResponse(req, ph, sel, psel, effModel, rewrote, upResp, attempt, res, chunk), nil
+			resp := f.buildResponse(req, ph, sel, psel, effModel, rewrote, upResp, attempt, res, chunk, rcancel)
+			if resp.Stream {
+				streamReturned = true
+			}
+			return resp, nil
 		}
 		if !res.Retryable {
-			return f.buildResponse(req, ph, sel, psel, effModel, rewrote, upResp, attempt, res, chunk), nil
+			resp := f.buildResponse(req, ph, sel, psel, effModel, rewrote, upResp, attempt, res, chunk, rcancel)
+			if resp.Stream {
+				streamReturned = true
+			}
+			return resp, nil
 		}
-		if upResp != nil && upResp.IsSSE {
-			upResp.Body.Close()
-		}
-		if upResp != nil && upResp.IsSSE && !sseStreamBudget(maxAttempts, attempt, policy.MaxStreamRetries, streamRetries) {
-			return f.buildResponse(req, ph, sel, psel, effModel, rewrote, upResp, attempt, res, chunk), nil
+		if f.sseRetryDecision(upResp, maxAttempts, attempt, policy.MaxStreamRetries, streamRetries) {
+			resp := f.buildResponse(req, ph, sel, psel, effModel, rewrote, upResp, attempt, res, chunk, rcancel)
+			if resp.Stream {
+				streamReturned = true
+			}
+			return resp, nil
 		}
 		lastErr = errors.New(res.Category.String())
 		lastCat = res.Category
@@ -397,7 +420,7 @@ func (f *Forwarder) classifyAndPeek(upResp *UpstreamResponse, err error, usedPro
 		return res, nil, nil, nil
 	}
 	// SSE: peek the first chunk so res is the real result.
-	chunk, readErr := stream.ReadFirstChunk(upResp.Body, policy.RequestTimeout)
+	chunk, readErr := stream.ReadFirstChunk(upResp.Body)
 	if readErr != nil {
 		if errors.Is(readErr, io.EOF) {
 			// Empty stream: terminal 502 (Status set so the server treats it
@@ -482,6 +505,26 @@ func applyConsequences(ph ProviderHandle, sel Selection, res attemptResult, upRe
 	return consequenceContinue
 }
 
+// sseRetryDecision resolves an SSE error response's fate after the unified
+// policy section has decided not to forward immediately: forward the peeked
+// response to the client when the stream-retry budget is exhausted, or close
+// the body and let the caller continue to the next attempt when budget
+// remains. Non-SSE responses (JSON, or nil) always continue without closing
+// here — JSON bodies are consumed by buildResponse or the Doer.
+//
+// Returns forwarded=true when the caller must return buildResponse now (the
+// body is left open for streaming); forwarded=false otherwise.
+func (f *Forwarder) sseRetryDecision(upResp *UpstreamResponse, maxAttempts, attempt, maxStreamRetries, streamRetries int) (forwarded bool) {
+	if upResp == nil || !upResp.IsSSE {
+		return false
+	}
+	if !sseStreamBudget(maxAttempts, attempt, maxStreamRetries, streamRetries) {
+		return true // budget exhausted: forward the peeked response, body stays open
+	}
+	upResp.Body.Close()
+	return false
+}
+
 // sseStreamBudget reports whether retry budget remains for an SSE error
 // chunk retry. Both the attempt budget (maxAttempts - attempt) and the
 // stream-retry budget (MaxStreamRetries) must be positive.
@@ -497,4 +540,21 @@ func isSSERequest(h http.Header) bool {
 	// stream detection comes from the upstream response content-type.
 	accept := h.Get("Accept")
 	return accept != "" && strings.Contains(strings.ToLower(accept), "text/event-stream")
+}
+
+// cancelOnClose wraps an io.ReadCloser so that Close invokes a cancel func
+// exactly once, in addition to closing the wrapped body.
+type cancelOnClose struct {
+	once   sync.Once
+	cancel context.CancelFunc
+	io.ReadCloser
+}
+
+func (c *cancelOnClose) Close() error {
+	var err error
+	if c.ReadCloser != nil {
+		err = c.ReadCloser.Close()
+	}
+	c.once.Do(c.cancel)
+	return err
 }

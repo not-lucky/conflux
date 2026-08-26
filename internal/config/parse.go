@@ -39,13 +39,9 @@ func (p *providersNode) UnmarshalYAML(value *yaml.Node) error {
 }
 
 type rawServer struct {
-	Port                    *int    `yaml:"port"`
-	RequestTimeout          *string `yaml:"request_timeout"`
-	StreamIdleTimeout       *string `yaml:"stream_idle_timeout"`
-	StreamKeepaliveInterval *string `yaml:"stream_keepalive_interval"`
-	RequestDeadline         *string `yaml:"request_deadline"`
-	ExposeDiagnostics       *bool   `yaml:"expose_diagnostics"`
-	AdminToken              *string `yaml:"admin_token"`
+	Port              *int    `yaml:"port"`
+	ExposeDiagnostics *bool   `yaml:"expose_diagnostics"`
+	AdminToken        *string `yaml:"admin_token"`
 }
 
 type rawAuth struct {
@@ -68,21 +64,17 @@ type rawGlobalProxy struct {
 // providers. Embedding it into rawDefaults and rawProvider collapses the
 // duplicated YAML schema so a new policy field is declared once.
 type rawPolicy struct {
-	KeySelection            *rawKeySelection  `yaml:"key_selection"`
-	ActiveWindow            *int              `yaml:"active_window"`
-	MaxErrors               *int              `yaml:"max_errors"`
-	Cooldown                *string           `yaml:"cooldown"`
-	RetireOnExhaustion      *bool             `yaml:"retire_on_exhaustion"`
-	MaxStreamRetries        *int              `yaml:"max_stream_retries"`
-	Upstream5xxThreshold    *int              `yaml:"upstream_5xx_threshold"`
-	Upstream5xxCooldown     *string           `yaml:"upstream_5xx_cooldown"`
-	RequestTimeout          *string           `yaml:"request_timeout"`
-	StreamIdleTimeout       *string           `yaml:"stream_idle_timeout"`
-	StreamKeepaliveInterval *string           `yaml:"stream_keepalive_interval"`
-	RequestDeadline         *string           `yaml:"request_deadline"`
-	RateLimitRPM            *int              `yaml:"rate_limit_rpm"`
-	Retry                   *rawRetry         `yaml:"retry"`
-	FallbackModels          map[string]string `yaml:"fallback_models"`
+	KeySelection         *rawKeySelection  `yaml:"key_selection"`
+	ActiveWindow         *int              `yaml:"active_window"`
+	MaxErrors            *int              `yaml:"max_errors"`
+	Cooldown             *string           `yaml:"cooldown"`
+	RetireOnExhaustion   *bool             `yaml:"retire_on_exhaustion"`
+	MaxStreamRetries     *int              `yaml:"max_stream_retries"`
+	Upstream5xxThreshold *int              `yaml:"upstream_5xx_threshold"`
+	Upstream5xxCooldown  *string           `yaml:"upstream_5xx_cooldown"`
+	RateLimitRPM         *int              `yaml:"rate_limit_rpm"`
+	Retry                *rawRetry         `yaml:"retry"`
+	FallbackModels       map[string]string `yaml:"fallback_models"`
 }
 
 type rawDefaults struct {

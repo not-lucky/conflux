@@ -84,6 +84,146 @@ func (t *Tracer) Level() Level { return t.level }
 // uses it to browse on-disk trace and error directories.
 func (t *Tracer) Root() string { return t.root }
 
+// TraceSummary is the merged metadata for one trace directory, read from
+// meta.json (success) or error.json (failure). Exactly one of Meta/Error is
+// non-nil. Outcome is "ok" or "error". Dir is the directory base name.
+//
+// This is the dashboard-facing accessor: it hides the trace/ vs error/
+// subdir split and the file-decoding details behind the trace package.
+type TraceSummary struct {
+	Dir     string
+	Outcome string // "ok" when Meta != nil, "error" when Error != nil
+	Meta    *Meta
+	Error   *ErrorInfo
+}
+
+// Provider returns the provider of the summary, whichever record is present.
+func (s TraceSummary) Provider() string {
+	if s.Meta != nil {
+		return s.Meta.Provider
+	}
+	if s.Error != nil {
+		return s.Error.Provider
+	}
+	return ""
+}
+
+// Model returns the model of the summary, whichever record is present.
+func (s TraceSummary) Model() string {
+	if s.Meta != nil {
+		return s.Meta.Model
+	}
+	if s.Error != nil {
+		return s.Error.Model
+	}
+	return ""
+}
+
+// DurationMs returns the request duration of the summary.
+func (s TraceSummary) DurationMs() int64 {
+	if s.Meta != nil {
+		return s.Meta.DurationMs
+	}
+	if s.Error != nil {
+		return s.Error.DurationMs
+	}
+	return 0
+}
+
+// ListTraces returns the names of all trace directories under root/trace,
+// sorted newest-first (reverse lexicographic — dir names are timestamp-
+// prefixed, so this is chronological newest-first). It does not read the
+// directory contents; pair each name with ReadTraceSummary for metadata.
+// Returns nil when the trace directory does not exist yet.
+func (t *Tracer) ListTraces() []string {
+	entries, err := os.ReadDir(filepath.Join(t.root, "trace"))
+	if err != nil {
+		return nil
+	}
+	names := make([]string, 0, len(entries))
+	for _, e := range entries {
+		if e.IsDir() {
+			names = append(names, e.Name())
+		}
+	}
+	sort.Sort(sort.Reverse(sort.StringSlice(names)))
+	return names
+}
+
+// ReadTraceSummary loads meta.json (success path) or, failing that,
+// error.json (failure path) for one trace directory. Returns a TraceSummary
+// with the appropriate field set, or a TraceSummary with only Dir populated
+// when neither file exists or can be decoded (the caller degrades gracefully).
+func (t *Tracer) ReadTraceSummary(dir string) TraceSummary {
+	sum := TraceSummary{Dir: dir}
+	if m := readJSONFile[Meta](filepath.Join(t.root, "trace", dir, "meta.json")); m != nil {
+		sum.Outcome = "ok"
+		sum.Meta = m
+		return sum
+	}
+	if e := readJSONFile[ErrorInfo](filepath.Join(t.root, "error", dir, "error.json")); e != nil {
+		sum.Outcome = "error"
+		sum.Error = e
+	}
+	return sum
+}
+
+// ListTraceFiles returns the file names inside one trace directory, sorted
+// lexicographically. Returns nil when the directory does not exist.
+func (t *Tracer) ListTraceFiles(dir string) []string {
+	entries, err := os.ReadDir(filepath.Join(t.root, "trace", dir))
+	if err != nil {
+		return nil
+	}
+	files := make([]string, 0, len(entries))
+	for _, e := range entries {
+		if !e.IsDir() {
+			files = append(files, e.Name())
+		}
+	}
+	sort.Strings(files)
+	return files
+}
+
+// ReadTraceFile reads one file from a trace directory for the dashboard viewer.
+// Large files (notably response.stream) are truncated to a 256 KiB preview
+// with a notice. JSON files are pretty-printed. Read errors return a
+// human-readable placeholder instead of propagating, since the viewer degrades
+// gracefully.
+func (t *Tracer) ReadTraceFile(dir, name string) string {
+	path := filepath.Join(t.root, "trace", dir, name)
+	b, err := os.ReadFile(path)
+	if err != nil {
+		return "(could not read " + name + ")"
+	}
+	const preview = 256 * 1024 // 256 KiB preview
+	if len(b) > preview {
+		return string(b[:preview]) + "\n\n… (truncated; see " + path + ")"
+	}
+	if strings.HasSuffix(name, ".json") {
+		var v any
+		if err := json.Unmarshal(b, &v); err == nil {
+			enc, _ := json.MarshalIndent(v, "", "  ")
+			return string(enc)
+		}
+	}
+	return string(b)
+}
+
+// readJSONFile decodes a JSON file into T, returning nil on any read/decode
+// error. Used by the trace-summary readers.
+func readJSONFile[T any](path string) *T {
+	b, err := os.ReadFile(path)
+	if err != nil {
+		return nil
+	}
+	var v T
+	if json.Unmarshal(b, &v) != nil {
+		return nil
+	}
+	return &v
+}
+
 // Span is one request trace. Open it, write fields, and Close to finalize.
 type Span struct {
 	tracer *Tracer
@@ -130,7 +270,7 @@ func (s *Span) WriteRequest(info RequestInfo) {
 	}
 	rec := map[string]any{
 		"method":   info.Method,
-		"url":      redactQuery(info.URL),
+		"url":      redact.QueryValues(info.URL),
 		"headers":  redact.Headers(info.Headers),
 		"body":     string(body),
 		"model":    info.Model,
@@ -232,55 +372,6 @@ func (s *Span) writeJSON(path string, v any) {
 	enc := json.NewEncoder(f)
 	enc.SetIndent("", "  ")
 	_ = enc.Encode(v)
-}
-
-// redactQuery masks ?key=, &api_key=, and &token= query values.
-func redactQuery(u string) string {
-	// Replace known query keys. A full URL parse is overkill here.
-	for _, k := range []string{"key", "api_key", "token"} {
-		u = redactQueryParam(u, k)
-	}
-	return u
-}
-
-func redactQueryParam(u, key string) string {
-	idx := 0
-	for {
-		i := indexOfCI(u, key+"=", idx)
-		if i < 0 {
-			break
-		}
-		// ensure it is a query param boundary
-		if i > 0 && u[i-1] != '?' && u[i-1] != '&' {
-			idx = i + 1
-			continue
-		}
-		start := i + len(key) + 1
-		end := start
-		for end < len(u) && u[end] != '&' {
-			end++
-		}
-		u = u[:start] + "****" + u[end:]
-		idx = start + 4
-	}
-	return u
-}
-
-// indexOfCI does a case-insensitive substring search starting at from. It
-// returns the byte offset of the first match (absolute, relative to s) or -1.
-func indexOfCI(s, sub string, from int) int {
-	if from < 0 {
-		from = 0
-	}
-	if from > len(s) {
-		from = len(s)
-	}
-	lower := strings.ToLower(s[from:])
-	found := strings.Index(lower, strings.ToLower(sub))
-	if found < 0 {
-		return -1
-	}
-	return from + found
 }
 
 // prune deletes the oldest subdirs beyond maxDirs in both the trace and

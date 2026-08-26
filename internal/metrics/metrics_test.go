@@ -90,7 +90,40 @@ func TestStatus(t *testing.T) {
 	if s.Metrics.TotalRequests != 1 {
 		t.Errorf("totalRequests = %d", s.Metrics.TotalRequests)
 	}
+	if s.Metrics.TotalErrors != 0 {
+		t.Errorf("totalErrors = %d, want 0 (the single response was 200)", s.Metrics.TotalErrors)
+	}
 	if len(s.Status.ClientKeys) != 1 || s.Status.ClientKeys[0] != "sk-…-001" {
 		t.Errorf("clientKeys = %v", s.Status.ClientKeys)
+	}
+}
+
+// TestResponseErrors verifies that TotalErrors is response-based (one per
+// downstream response with status >= 400), NOT the per-attempt error-category
+// count. Per-attempt categories (retries, in-stream errors) are a separate
+// series; the /_status headline error count must pair with requestsTotal so
+// success/error rates stay in [0,100] and never go negative.
+func TestResponseErrors(t *testing.T) {
+	r := New(time.Unix(1000, 0))
+	// 3 downstream responses: 200, 500, 502.
+	r.RecordRequest("openai", "gpt-4o", 200)
+	r.RecordRequest("openai", "gpt-4o", 500)
+	r.RecordRequest("openai", "gpt-4o", 502)
+	// Per-attempt error categories: the 500 was retried once, and an auth-fatal
+	// happened on a second attempt. These are NOT response counts.
+	r.RecordError("openai", "UPSTREAM_OUTAGE")
+	r.RecordError("openai", "KEY_AUTH_FATAL")
+	detail := StatusDetail{Providers: map[string]any{}}
+	s := r.Status("3.0", detail, nil)
+	if s.Metrics.TotalRequests != 3 {
+		t.Errorf("totalRequests = %d, want 3", s.Metrics.TotalRequests)
+	}
+	if s.Metrics.TotalErrors != 2 {
+		t.Errorf("totalErrors = %d, want 2 (the 500 and 502 responses, not the 2 per-attempt categories)", s.Metrics.TotalErrors)
+	}
+
+	snap := r.Snapshot()
+	if snap.ResponseErrors != 2 {
+		t.Errorf("Snapshot.ResponseErrors = %d, want 2", snap.ResponseErrors)
 	}
 }

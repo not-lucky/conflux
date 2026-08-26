@@ -2,15 +2,14 @@ package config
 
 import (
 	"errors"
+	"fmt"
 	"strings"
 	"testing"
-	"time"
 )
 
 const minimalYAML = `
 server:
   port: 24118
-  request_timeout: 60s
 auth:
   client_keys:
     - sk-conflux-global-001
@@ -41,9 +40,6 @@ func TestParseMinimal(t *testing.T) {
 	}
 	if cfg.Server.Port != 24118 {
 		t.Errorf("port = %d", cfg.Server.Port)
-	}
-	if cfg.Server.RequestTimeout != 60*time.Second {
-		t.Errorf("request_timeout = %v", cfg.Server.RequestTimeout)
 	}
 	if len(cfg.Auth.ClientKeys) != 1 || cfg.Auth.ClientKeys[0] != "sk-conflux-global-001" {
 		t.Errorf("client_keys = %v", cfg.Auth.ClientKeys)
@@ -77,9 +73,6 @@ func TestParseMinimal(t *testing.T) {
 	if oi.MaxErrors != 5 {
 		t.Errorf("max_errors = %d (want default 5)", oi.MaxErrors)
 	}
-	if oi.RequestTimeout != 60*time.Second {
-		t.Errorf("request_timeout = %v", oi.RequestTimeout)
-	}
 	if oi.KeySelection.Mode != "round_robin" {
 		t.Errorf("mode = %q", oi.KeySelection.Mode)
 	}
@@ -109,10 +102,10 @@ func TestParseDurationErrors(t *testing.T) {
 		yaml string
 		want error
 	}{
-		{`server: {request_timeout: 60}`, ErrBadDuration}, // bare number
-		{`server: {request_timeout: "0s"}`, ErrDurationNotPositive},
-		{`server: {request_timeout: "10"}`, ErrBadDuration},   // no unit
-		{`server: {request_timeout: "1.5s"}`, ErrBadDuration}, // float
+		{`defaults: {cooldown: 60}`, ErrBadDuration}, // bare number
+		{`defaults: {cooldown: "0s"}`, ErrDurationNotPositive},
+		{`defaults: {cooldown: "10"}`, ErrBadDuration},   // no unit
+		{`defaults: {cooldown: "1.5s"}`, ErrBadDuration}, // float
 	}
 	for i, c := range cases {
 		yaml := c.yaml + "\nauth: {client_keys: [sk-1]}\nproviders:\n  p:\n    base_url: https://x.com\n    models: [m]\n    keys: [{key: k}]\n"
@@ -390,6 +383,54 @@ providers:
 	_, err := parse([]byte(yaml))
 	if err == nil || !errors.Is(err, ErrActiveWindowError) {
 		t.Errorf("err = %v, want ErrActiveWindowError", err)
+	}
+}
+
+// TestParseEffectiveActiveWindow pins the single-source-of-truth derivation:
+// config.resolve bakes EffectiveActiveWindow once (0=>all keys, clamped to
+// len(keys)) so downstream consumers (keypool, server, app, dashboard) read one
+// field instead of re-deriving the rule.
+func TestParseEffectiveActiveWindow(t *testing.T) {
+	cases := []struct {
+		name  string
+		aw    int // configured active_window; 0 = unset
+		nKeys int
+		want  int
+	}{
+		{"unset means all keys", 0, 3, 3},
+		{"explicit equals keys", 2, 2, 2},
+		{"explicit less than keys", 1, 4, 1},
+		{"single key", 0, 1, 1},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			keys := make([]string, 0, c.nKeys)
+			for i := 0; i < c.nKeys; i++ {
+				keys = append(keys, fmt.Sprintf("{key: k%d}", i))
+			}
+			awLine := ""
+			if c.aw != 0 {
+				awLine = fmt.Sprintf("active_window: %d", c.aw)
+			}
+			yaml := fmt.Sprintf(`
+auth: {client_keys: [sk-1]}
+providers:
+  p:
+    base_url: https://x.com
+    models: [m]
+    keys: [%s]
+    %s
+`, strings.Join(keys, ","), awLine)
+			cfg, err := parse([]byte(yaml))
+			if err != nil {
+				t.Fatalf("parse: %v", err)
+			}
+			p := cfg.Providers[0]
+			if p.EffectiveActiveWindow != c.want {
+				t.Errorf("EffectiveActiveWindow = %d, want %d (ActiveWindow=%d, len(Keys)=%d)",
+					p.EffectiveActiveWindow, c.want, p.ActiveWindow, len(p.Keys))
+			}
+		})
 	}
 }
 

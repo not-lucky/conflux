@@ -54,15 +54,11 @@ type fakeServerHandle struct {
 
 func (h *fakeServerHandle) Policy() forward.ProviderPolicy {
 	return forward.ProviderPolicy{
-		Name:              h.name,
-		BaseURL:           "https://upstream.example.com/v1",
-		MaxAttempts:       1,
-		ActiveWindowSize:  1,
-		MaxStreamRetries:  0,
-		RequestTimeout:    30 * time.Second,
-		StreamIdleTimeout: 15 * time.Second,
-		KeepaliveInterval: 15 * time.Second,
-		RequestDeadline:   60 * time.Second,
+		Name:             h.name,
+		BaseURL:          "https://upstream.example.com/v1",
+		MaxAttempts:      1,
+		ActiveWindowSize: 1,
+		MaxStreamRetries: 0,
 	}
 }
 
@@ -103,10 +99,6 @@ func newTestServerWithConfig(t *testing.T, doer forward.Doer) *Server {
 const testYAML = `
 server:
   port: 24118
-  request_timeout: 30s
-  stream_idle_timeout: 15s
-  stream_keepalive_interval: 15s
-  request_deadline: 60s
 auth:
   client_keys:
     - "sk-client"
@@ -119,10 +111,6 @@ defaults:
   max_stream_retries: 0
   upstream_5xx_threshold: 5
   upstream_5xx_cooldown: 30s
-  request_timeout: 30s
-  stream_idle_timeout: 15s
-  stream_keepalive_interval: 15s
-  request_deadline: 60s
 providers:
   openai:
     base_url: "https://upstream.example.com/v1"
@@ -272,12 +260,18 @@ func TestServerMetrics(t *testing.T) {
 	ts := httptest.NewServer(srv.Handler())
 	defer ts.Close()
 
-	// Drive one proxied request.
+	// Drive one proxied request and one unauthorized request. Both are terminal
+	// downstream outcomes, so both must increment conflux_requests_total — the
+	// headline counter counts every response, not only successes.
 	body := `{"model":"gpt-4o"}`
 	req, _ := http.NewRequest(http.MethodPost, ts.URL+"/v1/chat/completions", strings.NewReader(body))
 	req.Header.Set("Authorization", "Bearer sk-client")
 	req.Header.Set("Content-Type", "application/json")
 	_, _ = ts.Client().Do(req)
+
+	badReq, _ := http.NewRequest(http.MethodPost, ts.URL+"/v1/chat/completions", strings.NewReader(body))
+	badReq.Header.Set("Content-Type", "application/json")
+	_, _ = ts.Client().Do(badReq)
 
 	resp, err := ts.Client().Get(ts.URL + "/metrics")
 	if err != nil {
@@ -286,6 +280,23 @@ func TestServerMetrics(t *testing.T) {
 	b, _ := io.ReadAll(resp.Body)
 	if !strings.Contains(string(b), "conflux_requests_total") {
 		t.Errorf("metrics missing requests_total:\n%s", b)
+	}
+	// 1 proxied (200) + 1 unauthorized (401) = 2 downstream responses.
+	if !strings.Contains(string(b), "conflux_requests_total 2") {
+		t.Errorf("requests_total should be 2 (success + unauthorized):\n%s", b)
+	}
+	// The unauthorized response carries the gateway sentinel provider label.
+	if !strings.Contains(string(b), `provider="__gateway__",status="401"`) {
+		t.Errorf("missing gateway 401 by-provider series:\n%s", b)
+	}
+	// The per-attempt error-category series also uses the sentinel for the
+	// pre-routing rejection, never the empty provider label.
+	if !strings.Contains(string(b), `conflux_error_categories_total{provider="__gateway__",category="UNAUTHORIZED"} 1`) {
+		t.Errorf("missing gateway UNAUTHORIZED error-category series:\n%s", b)
+	}
+	// And the success path carries the real provider label.
+	if !strings.Contains(string(b), `provider="openai",status="200"`) {
+		t.Errorf("missing openai 200 by-provider series:\n%s", b)
 	}
 }
 

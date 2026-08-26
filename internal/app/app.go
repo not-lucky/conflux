@@ -133,13 +133,14 @@ func buildLive(cfg *config.Config, priorState persist.State, store *persist.Stor
 			keys = append(keys, keypool.Key{Value: k.Value, Proxy: k.Proxy})
 		}
 		pools[p.Name] = keypool.New(keypool.Spec{
-			Keys:               keys,
-			Mode:               p.KeySelection.Mode,
-			RequestsPerKey:     p.KeySelection.RequestsPerKey,
-			ActiveWindow:       p.ActiveWindow,
-			MaxErrors:          p.MaxErrors,
-			Cooldown:           p.Cooldown,
-			RetireOnExhaustion: p.RetireOnExhaustion,
+			Keys:                  keys,
+			Mode:                  p.KeySelection.Mode,
+			RequestsPerKey:        p.KeySelection.RequestsPerKey,
+			ActiveWindow:          p.ActiveWindow,
+			EffectiveActiveWindow: p.EffectiveActiveWindow,
+			MaxErrors:             p.MaxErrors,
+			Cooldown:              p.Cooldown,
+			RetireOnExhaustion:    p.RetireOnExhaustion,
 		}, clk)
 		breakers[p.Name] = breaker.New(p.Upstream5xxThreshold, p.Upstream5xxCooldown, nil)
 	}
@@ -470,10 +471,7 @@ func buildHandles(cfg *config.Config, pools map[string]*keypool.Pool, breakers m
 		pool := pools[p.Name]
 		brk := breakers[p.Name]
 
-		aw := p.ActiveWindow
-		if aw == 0 {
-			aw = len(p.Keys)
-		}
+		aw := p.EffectiveActiveWindow
 
 		var ppc *proxy.PoolConfig
 		if p.Proxies != nil {
@@ -491,16 +489,12 @@ func buildHandles(cfg *config.Config, pools map[string]*keypool.Pool, breakers m
 			ppc:    ppc,
 			gpc:    gpc,
 			policy: forward.ProviderPolicy{
-				Name:              p.Name,
-				BaseURL:           p.BaseURL,
-				MaxAttempts:       p.RetryMaxAttempts,
-				ActiveWindowSize:  aw,
-				MaxStreamRetries:  p.MaxStreamRetries,
-				RequestTimeout:    p.RequestTimeout,
-				StreamIdleTimeout: p.StreamIdleTimeout,
-				KeepaliveInterval: p.StreamKeepaliveInterval,
-				RequestDeadline:   p.RequestDeadline,
-				FallbackModels:    p.FallbackModels,
+				Name:             p.Name,
+				BaseURL:          p.BaseURL,
+				MaxAttempts:      p.RetryMaxAttempts,
+				ActiveWindowSize: aw,
+				MaxStreamRetries: p.MaxStreamRetries,
+				FallbackModels:   p.FallbackModels,
 			},
 			saver: saver,
 		}
@@ -570,6 +564,16 @@ func (h *providerHandle) RecordProxySuccess(url string) {
 func (h *providerHandle) BreakerOpen() bool  { return h.brk.Open() }
 func (h *providerHandle) BreakerOn5xx() bool { return h.brk.On5xx() }
 func (h *providerHandle) BreakerOn2xx()      { h.brk.On2xx() }
+
+// Compile-time assertions that providerHandle satisfies the three focused
+// ports and the composite ProviderHandle, so a future signature drift in
+// any port is caught at build time rather than at the forwarder's call site.
+var (
+	_ forward.KeySource      = (*providerHandle)(nil)
+	_ forward.ProxyResolver  = (*providerHandle)(nil)
+	_ forward.Breaker        = (*providerHandle)(nil)
+	_ forward.ProviderHandle = (*providerHandle)(nil)
+)
 
 // effectiveProxyCfg returns the provider pool when it has URLs, else the
 // global pool.

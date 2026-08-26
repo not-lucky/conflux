@@ -60,10 +60,3 @@ func modelStrings(ms []config.ModelEntry) []string {
 	}
 	return out
 }
-
-func effectiveActiveKeys(p config.Provider) int {
-	if p.ActiveWindow > 0 {
-		return p.ActiveWindow
-	}
-	return len(p.Keys)
-}

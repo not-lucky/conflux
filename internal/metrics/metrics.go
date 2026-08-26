@@ -15,6 +15,12 @@ import (
 	"time"
 )
 
+// GatewayProvider is the synthetic provider label for terminal outcomes that
+// never reach a real provider, such as auth failures, malformed requests, and
+// model-not-found. It is a stable, non-empty string so Prometheus labels and
+// Grafana templating do not see provider="".
+const GatewayProvider = "__gateway__"
+
 // Registry is the central metrics store. Safe for concurrent use.
 type Registry struct {
 	startTime time.Time
@@ -182,7 +188,7 @@ func (r *Registry) WritePrometheus(w io.Writer) {
 	}
 
 	// error_categories_total
-	fmt.Fprintln(w, "# HELP conflux_error_categories_total counter, one per classified error attempt")
+	fmt.Fprintln(w, "# HELP conflux_error_categories_total counter, one per classified error attempt (retries counted; distinct from requests_total)")
 	for prov, cats := range r.errorCategories {
 		for cat, n := range cats {
 			fmt.Fprintf(w, "conflux_error_categories_total{provider=%q,category=%q} %d\n", prov, cat, n)
@@ -236,8 +242,8 @@ type ProxyHealth struct {
 }
 
 type StatusMetrics struct {
-	TotalRequests int64 `json:"totalRequests"`
-	TotalErrors   int64 `json:"totalErrors"`
+	TotalRequests int64 `json:"totalRequests"` // one per downstream response
+	TotalErrors   int64 `json:"totalErrors"`   // downstream responses with status >= 400 (one per response)
 }
 
 type StatusDetail struct {
@@ -252,12 +258,6 @@ type StatusDetail struct {
 func (r *Registry) Status(version string, detail StatusDetail, proxyHealth map[string]ProxyHealth) StatusJSON {
 	r.mu.Lock()
 	defer r.mu.Unlock()
-	var totalErrors int64
-	for _, cats := range r.errorCategories {
-		for _, n := range cats {
-			totalErrors += n
-		}
-	}
 	return StatusJSON{
 		Version:       version,
 		OK:            true,
@@ -265,10 +265,26 @@ func (r *Registry) Status(version string, detail StatusDetail, proxyHealth map[s
 		Proxies:       proxyHealth,
 		Metrics: StatusMetrics{
 			TotalRequests: r.requestsTotal.Load(),
-			TotalErrors:   totalErrors,
+			TotalErrors:   r.responseErrorsLocked(),
 		},
 		Status: detail,
 	}
+}
+
+// responseErrorsLocked counts downstream responses whose final HTTP status is
+// an error (>= 400), summed across all providers (including the gateway-level
+// sentinel). It is the response-based counterpart to requestsTotal: one per
+// downstream response, never per-attempt. Callers must hold r.mu.
+func (r *Registry) responseErrorsLocked() int64 {
+	var n int64
+	for _, byStatus := range r.requestsByProvider {
+		for status, c := range byStatus {
+			if status >= 400 {
+				n += c
+			}
+		}
+	}
+	return n
 }
 
 // Snapshot is a structured copy of all counters, gauges, and histograms at a
@@ -278,9 +294,10 @@ func (r *Registry) Status(version string, detail StatusDetail, proxyHealth map[s
 type Snapshot struct {
 	UptimeSeconds      int64
 	RequestsTotal      int64
+	ResponseErrors     int64                               // downstream responses with status >= 400 (one per response)
 	RequestsByProvider map[string]map[int]int64            // provider -> status -> count
 	RequestsByModel    map[string]map[string]map[int]int64 // model -> provider -> status -> count
-	ErrorCategories    map[string]map[string]int64         // provider -> category -> count
+	ErrorCategories    map[string]map[string]int64         // provider -> category -> count (per-attempt)
 	KeysGauge          map[string]map[string]int64         // provider -> state -> count
 	ProxyHealthy       map[string]int64                    // url -> 1/0
 	Histogram          map[string]HistogramSnapshot        // provider -> histogram
@@ -304,6 +321,7 @@ func (r *Registry) Snapshot() Snapshot {
 	s := Snapshot{
 		UptimeSeconds:      int64(time.Since(r.uptimeStart).Seconds()),
 		RequestsTotal:      r.requestsTotal.Load(),
+		ResponseErrors:     r.responseErrorsLocked(),
 		RequestsByProvider: copyIntStatus(r.requestsByProvider),
 		RequestsByModel:    copyModelStatus(r.requestsByModel),
 		ErrorCategories:    copyStringInt(r.errorCategories),

@@ -1,6 +1,7 @@
 config.toml
 /conflux
 /conflux.exe
+/dist/
 *.test
 *.out
 config.yaml

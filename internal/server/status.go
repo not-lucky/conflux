@@ -43,7 +43,7 @@ func (s *Server) handleStatus(w http.ResponseWriter, r *http.Request) {
 			"keyStrategy":          p.KeySelection.Mode,
 			"requestsPerKey":       p.KeySelection.RequestsPerKey,
 			"retireKeys":           p.RetireOnExhaustion,
-			"activeKeys":           effectiveActiveKeys(p),
+			"activeKeys":           p.EffectiveActiveWindow,
 			"retryMaxAttempts":     p.RetryMaxAttempts,
 		}
 	}

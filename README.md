@@ -59,13 +59,11 @@ Conflux:
 6. Rewrites headers (swaps the client key for the provider key, strips
    hop-by-hop headers), rewrites the URL, and optionally rewrites the model
    field for fallbacks.
-7. Sends the request upstream via HTTP/HTTPS or SOCKS5, with a per-attempt
-   time-to-first-byte (TTFB) deadline and an end-to-end request deadline.
+7. Sends the request upstream via HTTP/HTTPS or SOCKS5 as a native passthrough.
 8. Classifies the upstream response and decides: forward, retry on a new key,
    retry through a different proxy, or penalize the key.
 9. For SSE: peeks the first chunk to detect an error envelope before streaming,
-   applies keepalive comments and an idle watchdog, and retries empty/broken
-   streams within a stream-retry budget.
+   and retries empty/broken streams within a stream-retry budget.
 10. Records metrics, writes a (redacted) trace, persists key/proxy state, and
     streams the response back to the client.
 
@@ -82,8 +80,8 @@ state file on restart so a restart does not reset your pools.
 | **Routing** | Exact, longest-prefix, and catch-all model matching with cross-provider overlap validation |
 | **Key pools** | Per-provider pools, active window + FIFO standby promotion, round-robin & sticky modes, `requests_per_key`, exhaustion & retirement, lazy cooldown re-entry |
 | **Proxies** | Global pool, per-provider pool override, per-key inline override; `http`, `https`, `socks5`, `socks5h`; rotation by cycle; per-URL circuit breaking |
-| **Resilience** | Per-provider upstream-5xx circuit breaker, retry loop with anti-drain guard, per-attempt and end-to-end deadlines, TTFB enforcement, stream-retry budget |
-| **SSE** | First-chunk error peek, keepalive comments, idle watchdog, in-stream error detection, `[DONE]` handling, partial-line re-injection |
+| **Resilience** | Per-provider upstream-5xx circuit breaker, retry loop with anti-drain guard, proxy network error failover, stream-retry budget |
+| **SSE** | First-chunk error peek, in-stream error detection, `[DONE]` handling, partial-line re-injection |
 | **Error classification** | Success, Redirect, SharedPoolRateLimited, KeyRateLimited, KeyAuthFatal, KeyBilling, UpstreamOutage, ClientError, ProxyNetworkError, UnknownError — each with penalize/retryable semantics |
 | **Fallbacks** | `fallback_models` maps one model id to another, re-serialized into the body |
 | **Rate limiting** | Per-client-key 60s sliding window, 10k LRU, idle-first eviction |
@@ -157,7 +155,7 @@ go build -o conflux ./cmd/conflux
 #   or:  make build
 
 # 2. Create a config.yaml (see "Configuration" below). A sample is included:
-cp config.yaml my-config.yaml   # then edit the keys and providers
+cp config.example.yaml my-config.yaml   # then edit the keys and providers
 
 # 3. Run it
 ./conflux -config my-config.yaml
@@ -193,15 +191,11 @@ The first present value wins, and the fully resolved value is baked into the
 `Config` tree at load time — there is **no runtime inheritance lookup**, so
 runtime code only ever reads resolved fields.
 
-Here is the bundled `config.yaml` with every section annotated:
+Here is the bundled `config.example.yaml` with every section annotated:
 
 ```yaml
 server:
   port: 24118
-  request_timeout: 60s        # per-attempt TTFB deadline
-  stream_idle_timeout: 15s   # SSE idle watchdog
-  stream_keepalive_interval: 15s
-  request_deadline: 180s     # end-to-end deadline across all retries
   expose_diagnostics: true   # emit X-Conflux-* response headers
   admin_token: "admin-secret-change-me"
 
@@ -229,10 +223,6 @@ defaults:                    # policy fields inherited by every provider
   max_stream_retries: 3
   upstream_5xx_threshold: 5
   upstream_5xx_cooldown: 30s
-  request_timeout: 60s
-  stream_idle_timeout: 15s
-  stream_keepalive_interval: 15s
-  request_deadline: 180s
 
 providers:                   # a MAP keyed by provider name
   openai:
@@ -278,10 +268,6 @@ persistence:
 | Field | Type | Default | Notes |
 | --- | --- | --- | --- |
 | `port` | int | — | Listen port. |
-| `request_timeout` | duration | 60s | Per-attempt TTFB deadline (time to first response header). |
-| `stream_idle_timeout` | duration | 15s | SSE idle watchdog; 0 disables. |
-| `stream_keepalive_interval` | duration | 15s | SSE `: keepalive` comment interval; 0 disables. |
-| `request_deadline` | duration | 180s | End-to-end deadline spanning all retry attempts. |
 | `expose_diagnostics` | bool | false | When true, inject `X-Conflux-*` response headers. |
 | `admin_token` | string | "" | Admin token. Empty ⇒ `/admin/reload` always returns 401. |
 
@@ -322,10 +308,6 @@ These fields also appear under each provider and are inherited:
 | `max_stream_retries` | int | 3 | SSE error-chunk retry budget. |
 | `upstream_5xx_threshold` | int | 5 | Consecutive 5xx before the provider breaker opens. |
 | `upstream_5xx_cooldown` | duration | 30s | Breaker open duration. |
-| `request_timeout` | duration | 60s | Per-attempt TTFB. |
-| `stream_idle_timeout` | duration | 15s | SSE idle watchdog. |
-| `stream_keepalive_interval` | duration | 15s | SSE keepalive. |
-| `request_deadline` | duration | 180s | End-to-end deadline. |
 | `rate_limit_rpm` | int | 0 (unlimited) | Per-client-key requests/min. Provider value overrides default. |
 | `retry.max_attempts` | int | computed | Max retry attempts. Default = `min(active_window, 3)`, clamped ≥ 1. |
 | `fallback_models` | map | {} | `{from: to}` model id rewrites applied to the body. |
@@ -449,6 +431,8 @@ Prometheus exposition. Key series:
 | `conflux_request_duration_ms` | histogram | `provider` | Admission → downstream response end. Buckets: 1…300000 ms + `+Inf`. |
 | `conflux_keys` | gauge | `provider`, `state` | `active`/`standby`/`exhausted`/`retired` key counts. |
 | `conflux_proxy_healthy` | gauge | `proxy` | 1 healthy, 0 tripped. |
+
+The `provider` label is the real upstream for proxied requests, and the sentinel `__gateway__` for terminal outcomes that never reach a provider (auth failure, malformed request, model not found, rate limit). This keeps every `provider=` label non-empty for Grafana templating and lets you split gateway-side rejections from upstream traffic.
 
 ---
 
@@ -617,7 +601,7 @@ ultimately to direct. Rotation shifts the slot→proxy mapping every
 `rotate_interval` provider cycles.
 
 **The retry loop** is bounded by `retry.max_attempts` (default
-`min(active_window, 3)`), the end-to-end `request_deadline`, and (for SSE) the
+`min(active_window, 3)`) and (for SSE) the
 `max_stream_retries` budget. Penalized retries use a distinct key;
 `PROXY_NETWORK_ERROR` retries reuse the same key through a different proxy.
 
@@ -626,7 +610,7 @@ ultimately to direct. Rotation shifts the slot→proxy mapping every
 (`rate_limit_exceeded`, `api key`, `organization`, …) is `KEY_RATE_LIMITED`
 (penalize, retry on a new key), while a bare 429 is `SHARED_POOL_RATE_LIMITED`
 (no penalty). A 402 is `KEY_BILLING`; 5xx is `UPSTREAM_OUTAGE` (breaker-gated);
-a transport/TTFB failure is `PROXY_NETWORK_ERROR` (penalize the proxy, not the
+a transport failure is `PROXY_NETWORK_ERROR` (penalize the proxy, not the
 key).
 
 ---
@@ -636,7 +620,7 @@ key).
 ```
 conflux/
 ├── cmd/conflux/main.go        # entry point: flags, config.Load, app.Build, server.Serve
-├── config.yaml               # sample configuration
+├── config.example.yaml      # sample configuration (copy to config.yaml)
 ├── go.mod / go.sum
 ├── Makefile
 └── internal/
@@ -649,7 +633,7 @@ conflux/
     ├── ratelimit/           # per-client-key sliding window limiter
     ├── model/               # model-id → provider routing table
     ├── classify/            # upstream error classification + SSE probe
-    ├── stream/              # SSE peek, pipe, keepalive, idle watchdog
+    ├── stream/              # SSE peek, pipe, in-stream error detection
     ├── persist/             # state file load/save, debounce, atomic write
     ├── metrics/             # Prometheus exposition + /_status snapshot
     ├── trace/               # on-disk request tracing + retention pruning

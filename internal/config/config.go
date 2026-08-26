@@ -21,13 +21,9 @@ type Config struct {
 }
 
 type ServerConfig struct {
-	Port                    int
-	RequestTimeout          time.Duration
-	StreamIdleTimeout       time.Duration
-	StreamKeepaliveInterval time.Duration
-	RequestDeadline         time.Duration
-	ExposeDiagnostics       bool
-	AdminToken              string // empty when absent, which makes /admin/reload always return 401
+	Port              int
+	ExposeDiagnostics bool
+	AdminToken        string // empty when absent, which makes /admin/reload always return 401
 }
 
 type AuthConfig struct {
@@ -55,21 +51,18 @@ type GlobalProxyConfig struct {
 // field declarations so a single applyPolicyFields path can write to either
 // resolved struct via a *PolicyFields pointer.
 type PolicyFields struct {
-	KeySelection            KeySelection
-	ActiveWindow            int
-	MaxErrors               int
-	Cooldown                time.Duration
-	RetireOnExhaustion      bool
-	MaxStreamRetries        int
-	Upstream5xxThreshold    int
-	Upstream5xxCooldown     time.Duration
-	RequestTimeout          time.Duration
-	StreamIdleTimeout       time.Duration
-	StreamKeepaliveInterval time.Duration
-	RequestDeadline         time.Duration
-	RateLimitRPM            int
-	RetryMaxAttempts        int
-	FallbackModels          map[string]string
+	KeySelection          KeySelection
+	ActiveWindow          int // 0 means "all keys"; EffectiveActiveWindow is the resolved value
+	EffectiveActiveWindow int // active window with the 0=>all-keys rule and len(keys) clamp applied
+	MaxErrors             int
+	Cooldown              time.Duration
+	RetireOnExhaustion    bool
+	MaxStreamRetries      int
+	Upstream5xxThreshold  int
+	Upstream5xxCooldown   time.Duration
+	RateLimitRPM          int
+	RetryMaxAttempts      int
+	FallbackModels        map[string]string
 }
 
 type DefaultsConfig struct {

@@ -72,3 +72,26 @@ func TestURL(t *testing.T) {
 		}
 	}
 }
+
+func TestQueryValues(t *testing.T) {
+	cases := []struct{ in, want string }{
+		// Sensitive value masked, other params and order preserved.
+		{"https://api.x.com/v1/chat?key=secret&model=gpt-4o", "https://api.x.com/v1/chat?key=****&model=gpt-4o"},
+		// Case-insensitive key match.
+		{"https://x.com/c?Key=secret", "https://x.com/c?Key=****"},
+		{"https://x.com/c?API_KEY=secret", "https://x.com/c?API_KEY=****"},
+		// Multiple sensitive keys in one query.
+		{"https://x.com/c?token=t1&api_key=a1&safe=s", "https://x.com/c?token=****&api_key=****&safe=s"},
+		// No sensitive params: unchanged.
+		{"https://x.com/c?model=m&n=1", "https://x.com/c?model=m&n=1"},
+		// No query: unchanged.
+		{"https://x.com/c", "https://x.com/c"},
+		// A key-like substring that is not a param boundary is not masked.
+		{"https://x.com/apikey=foo", "https://x.com/apikey=foo"},
+	}
+	for _, c := range cases {
+		if got := QueryValues(c.in); got != c.want {
+			t.Errorf("QueryValues(%q) = %q, want %q", c.in, got, c.want)
+		}
+	}
+}

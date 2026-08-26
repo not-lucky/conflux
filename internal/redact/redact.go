@@ -55,6 +55,47 @@ func URL(s string) string {
 	return u.String()
 }
 
+// queryKeys is the set of query parameter names whose values are masked in
+// QueryValues. Matched case-insensitively against the decoded key.
+var queryKeys = map[string]bool{
+	"key":     true,
+	"api_key": true,
+	"token":   true,
+}
+
+// QueryValues masks the values of sensitive query parameters (key, api_key,
+// token) in a URL string, replacing each with "****" while preserving the
+// rest of the URL verbatim — scheme, host, path, other params, and their
+// original order. It uses net/url to locate the query and to decode each key
+// so masking is robust against URL-encoding and parameter ordering, unlike a
+// raw substring search. On any parse failure the input is returned unchanged.
+func QueryValues(s string) string {
+	u, err := url.Parse(s)
+	if err != nil {
+		return s
+	}
+	rq := u.RawQuery
+	if rq == "" {
+		return s
+	}
+	parts := strings.Split(rq, "&")
+	for i, p := range parts {
+		eq := strings.IndexByte(p, '=')
+		if eq < 0 {
+			continue
+		}
+		k, err := url.QueryUnescape(p[:eq])
+		if err != nil {
+			continue
+		}
+		if queryKeys[strings.ToLower(k)] {
+			parts[i] = p[:eq+1] + "****"
+		}
+	}
+	u.RawQuery = strings.Join(parts, "&")
+	return u.String()
+}
+
 // Headers returns a copy of h with sensitive headers (authorization,
 // x-api-key, api-key, proxy-authorization) redacted via AuthHeader or Key.
 // Other headers are preserved verbatim. Header names are matched

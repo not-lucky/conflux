@@ -83,22 +83,40 @@ func TestPeekClassifiesErrorAtBoundary(t *testing.T) {
 }
 
 func TestReadFirstChunkEmptyStream(t *testing.T) {
-	_, err := ReadFirstChunk(bytes.NewReader(nil), time.Second)
+	_, err := ReadFirstChunk(bytes.NewReader(nil))
 	if !errors.Is(err, io.EOF) {
 		t.Errorf("empty stream err = %v, want io.EOF", err)
 	}
 }
 
-func TestReadFirstChunkTimeout(t *testing.T) {
-	// A reader that never delivers hits the TTFB deadline.
-	r := &slowReader{}
-	_, err := ReadFirstChunk(r, 50*time.Millisecond)
-	if err == nil {
-		t.Fatal("expected ttfb timeout")
+func TestReadFirstChunkNonBlockingInitialRead(t *testing.T) {
+	// A stream that yields an initial small chunk and then delays must return
+	// the first chunk immediately without waiting for a second read.
+	r := &firstChunkThenSlowReader{
+		first: []byte("data: {\"test\": 1}\n\n"),
 	}
-	if !strings.Contains(err.Error(), "ttfb") {
-		t.Errorf("err = %v, want ttfb timeout", err)
+	chunk, err := ReadFirstChunk(r)
+	if err != nil {
+		t.Fatalf("ReadFirstChunk: %v", err)
 	}
+	if string(chunk) != "data: {\"test\": 1}\n\n" {
+		t.Errorf("chunk = %q, want %q", string(chunk), "data: {\"test\": 1}\n\n")
+	}
+}
+
+type firstChunkThenSlowReader struct {
+	first []byte
+	read  bool
+}
+
+func (r *firstChunkThenSlowReader) Read(p []byte) (int, error) {
+	if !r.read {
+		r.read = true
+		n := copy(p, r.first)
+		return n, nil
+	}
+	time.Sleep(5 * time.Second)
+	return 0, io.EOF
 }
 
 type slowReader struct{}
@@ -111,7 +129,7 @@ func (slowReader) Read([]byte) (int, error) {
 func TestPipePassthrough(t *testing.T) {
 	src := strings.NewReader("data: hello\n\ndata: world\n\n")
 	var dst bytes.Buffer
-	err := Pipe(context.Background(), src, &dst, nil, PipeOptions{}, nil)
+	err := Pipe(context.Background(), src, &dst, nil, nil)
 	if err != nil {
 		t.Fatalf("Pipe: %v", err)
 	}
@@ -124,73 +142,11 @@ func TestPipeTrailingReinjected(t *testing.T) {
 	// The trailing partial line is re-injected before src.
 	src := strings.NewReader(" world\n\n")
 	var dst bytes.Buffer
-	err := Pipe(context.Background(), src, &dst, []byte("data: hello"), PipeOptions{}, nil)
+	err := Pipe(context.Background(), src, &dst, []byte("data: hello"), nil)
 	if err != nil {
 		t.Fatalf("Pipe: %v", err)
 	}
 	if dst.String() != "data: hello world\n\n" {
 		t.Errorf("dst = %q", dst.String())
 	}
-}
-
-func TestPipeKeepalive(t *testing.T) {
-	// A slow source with a short keepalive interval emits keepalives.
-	src := &intervalReader{lines: [][]byte{[]byte("data: a\n\n")}, delay: 100 * time.Millisecond}
-	var dst bytes.Buffer
-	err := Pipe(context.Background(), src, &dst, nil, PipeOptions{
-		KeepaliveInterval: 30 * time.Millisecond,
-		IdleTimeout:       5 * time.Second,
-	}, nil)
-	if err != nil {
-		t.Fatalf("Pipe: %v", err)
-	}
-	if !strings.Contains(dst.String(), Keepalive) {
-		t.Errorf("expected keepalive in output, got %q", dst.String())
-	}
-	if !strings.Contains(dst.String(), "data: a\n\n") {
-		t.Errorf("expected data line, got %q", dst.String())
-	}
-}
-
-func TestPipeIdleTimeout(t *testing.T) {
-	// A source that stalls after one line triggers the idle timeout.
-	src := &intervalReader{lines: [][]byte{[]byte("data: a\n\n")}, delay: 0, stallAfter: true}
-	var dst bytes.Buffer
-	err := Pipe(context.Background(), src, &dst, nil, PipeOptions{
-		IdleTimeout: 40 * time.Millisecond,
-	}, nil)
-	if err == nil {
-		t.Fatal("expected idle timeout error")
-	}
-	if !strings.Contains(dst.String(), "TimeoutError") {
-		t.Errorf("expected terminal error chunk, got %q", dst.String())
-	}
-}
-
-// intervalReader emits lines with optional delays and an optional final stall.
-type intervalReader struct {
-	lines      [][]byte
-	delay      time.Duration
-	stallAfter bool
-	off        int
-}
-
-func (r *intervalReader) Read(p []byte) (int, error) {
-	if r.off >= len(r.lines) {
-		if r.stallAfter {
-			time.Sleep(5 * time.Second)
-			return 0, io.EOF
-		}
-		return 0, io.EOF
-	}
-	time.Sleep(r.delay)
-	line := r.lines[r.off]
-	n := copy(p, line)
-	r.off++
-	if n < len(line) {
-		// The line was not fully copied. Rewinding by pushing the remainder
-		// back is not supported here, so tests keep lines small enough to
-		// fit.
-	}
-	return n, nil
 }

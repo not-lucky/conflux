@@ -123,10 +123,3 @@ func (l *Limiter) evictIdleLocked(now time.Time) {
 		delete(l.buckets, b.key)
 	}
 }
-
-// Snapshot returns the current count of tracked client keys, for /_status.
-func (l *Limiter) Snapshot() int {
-	l.mu.Lock()
-	defer l.mu.Unlock()
-	return len(l.buckets)
-}

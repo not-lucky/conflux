@@ -108,12 +108,8 @@ func resolve(raw *rawConfig) (*Config, error) {
 
 func resolveServer(s *rawServer) (ServerConfig, error) {
 	out := ServerConfig{
-		Port:                    24118,
-		RequestTimeout:          60 * time.Second,
-		StreamIdleTimeout:       15 * time.Second,
-		StreamKeepaliveInterval: 15 * time.Second,
-		RequestDeadline:         180 * time.Second,
-		ExposeDiagnostics:       true,
+		Port:              24118,
+		ExposeDiagnostics: true,
 	}
 	if s == nil {
 		return out, nil
@@ -124,18 +120,6 @@ func resolveServer(s *rawServer) (ServerConfig, error) {
 			return ServerConfig{}, wrapf(ErrInvalidPort, "server.port", "must be 1-65535, got %d", p)
 		}
 		out.Port = p
-	}
-	if err := dur(&out.RequestTimeout, "server.request_timeout", s.RequestTimeout); err != nil {
-		return ServerConfig{}, err
-	}
-	if err := dur(&out.StreamIdleTimeout, "server.stream_idle_timeout", s.StreamIdleTimeout); err != nil {
-		return ServerConfig{}, err
-	}
-	if err := dur(&out.StreamKeepaliveInterval, "server.stream_keepalive_interval", s.StreamKeepaliveInterval); err != nil {
-		return ServerConfig{}, err
-	}
-	if err := dur(&out.RequestDeadline, "server.request_deadline", s.RequestDeadline); err != nil {
-		return ServerConfig{}, err
 	}
 	boolval(&out.ExposeDiagnostics, s.ExposeDiagnostics)
 	if s.AdminToken != nil {
@@ -219,16 +203,12 @@ func resolveGlobalProxy(g *rawGlobalProxy) (GlobalProxyConfig, error) {
 
 func resolveDefaults(d *rawDefaults, server ServerConfig) (DefaultsConfig, error) {
 	out := DefaultsConfig{PolicyFields: PolicyFields{
-		KeySelection:            KeySelection{Mode: "round_robin", RequestsPerKey: 1},
-		MaxErrors:               5,
-		Cooldown:                5 * time.Hour,
-		MaxStreamRetries:        3,
-		Upstream5xxThreshold:    5,
-		Upstream5xxCooldown:     30 * time.Second,
-		RequestTimeout:          server.RequestTimeout,
-		StreamIdleTimeout:       server.StreamIdleTimeout,
-		StreamKeepaliveInterval: server.StreamKeepaliveInterval,
-		RequestDeadline:         server.RequestDeadline,
+		KeySelection:         KeySelection{Mode: "round_robin", RequestsPerKey: 1},
+		MaxErrors:            5,
+		Cooldown:             5 * time.Hour,
+		MaxStreamRetries:     3,
+		Upstream5xxThreshold: 5,
+		Upstream5xxCooldown:  30 * time.Second,
 	}}
 	if d == nil {
 		return out, nil
@@ -271,18 +251,6 @@ func applyPolicyFields(p *PolicyFields, field, ksField string, raw *rawPolicy) e
 		return err
 	}
 	if err := dur(&p.Upstream5xxCooldown, field+".upstream_5xx_cooldown", raw.Upstream5xxCooldown); err != nil {
-		return err
-	}
-	if err := dur(&p.RequestTimeout, field+".request_timeout", raw.RequestTimeout); err != nil {
-		return err
-	}
-	if err := dur(&p.StreamIdleTimeout, field+".stream_idle_timeout", raw.StreamIdleTimeout); err != nil {
-		return err
-	}
-	if err := dur(&p.StreamKeepaliveInterval, field+".stream_keepalive_interval", raw.StreamKeepaliveInterval); err != nil {
-		return err
-	}
-	if err := dur(&p.RequestDeadline, field+".request_deadline", raw.RequestDeadline); err != nil {
 		return err
 	}
 	if err := intval(&p.RateLimitRPM, field+".rate_limit_rpm", raw.RateLimitRPM, 1, ErrProviderError); err != nil {
@@ -418,21 +386,17 @@ func resolveProvider(p *rawProvider, def DefaultsConfig, server ServerConfig, gl
 	out := Provider{
 		Name: p.Name, BaseURL: base, Models: entries, Keys: keys, Proxies: ppc,
 		PolicyFields: PolicyFields{
-			KeySelection:            def.KeySelection,
-			ActiveWindow:            def.ActiveWindow,
-			MaxErrors:               def.MaxErrors,
-			Cooldown:                def.Cooldown,
-			RetireOnExhaustion:      def.RetireOnExhaustion,
-			MaxStreamRetries:        def.MaxStreamRetries,
-			Upstream5xxThreshold:    def.Upstream5xxThreshold,
-			Upstream5xxCooldown:     def.Upstream5xxCooldown,
-			RequestTimeout:          def.RequestTimeout,
-			StreamIdleTimeout:       def.StreamIdleTimeout,
-			StreamKeepaliveInterval: def.StreamKeepaliveInterval,
-			RequestDeadline:         def.RequestDeadline,
-			RateLimitRPM:            def.RateLimitRPM,
-			RetryMaxAttempts:        def.RetryMaxAttempts,
-			FallbackModels:          def.FallbackModels,
+			KeySelection:         def.KeySelection,
+			ActiveWindow:         def.ActiveWindow,
+			MaxErrors:            def.MaxErrors,
+			Cooldown:             def.Cooldown,
+			RetireOnExhaustion:   def.RetireOnExhaustion,
+			MaxStreamRetries:     def.MaxStreamRetries,
+			Upstream5xxThreshold: def.Upstream5xxThreshold,
+			Upstream5xxCooldown:  def.Upstream5xxCooldown,
+			RateLimitRPM:         def.RateLimitRPM,
+			RetryMaxAttempts:     def.RetryMaxAttempts,
+			FallbackModels:       def.FallbackModels,
 		},
 	}
 
@@ -457,6 +421,14 @@ func resolveProvider(p *rawProvider, def DefaultsConfig, server ServerConfig, gl
 	// Per-provider active_window: must not exceed the number of keys.
 	if p.rawPolicy.ActiveWindow != nil && out.ActiveWindow > len(keys) {
 		return Provider{}, wrapf(ErrActiveWindowError, "providers."+p.Name+".active_window", "must be <= len(keys) (%d), got %d", len(keys), out.ActiveWindow)
+	}
+	// Bake the effective active window once, here, so every downstream
+	// consumer (keypool, server models, app, dashboard) reads one field
+	// instead of re-deriving the "0 means all keys, clamp to len(keys)" rule.
+	// The rule and the len(keys) bound are both fully known at this point.
+	out.EffectiveActiveWindow = out.ActiveWindow
+	if out.EffectiveActiveWindow == 0 || out.EffectiveActiveWindow > len(out.Keys) {
+		out.EffectiveActiveWindow = len(out.Keys)
 	}
 	return out, nil
 }

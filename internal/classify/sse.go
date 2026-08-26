@@ -115,9 +115,10 @@ func hasMarkerIn(hayLower string, markers []string) bool {
 }
 
 // ParseSSEPayload parses a single `data:` line payload as JSON. It returns
-// the decoded object and whether the object is an error envelope: a top-level
-// `error` key or a top-level `type` equal to " payload is
-// not JSON and returns (nil, false). Non-object JSON returns (nil, false).
+// the decoded object and whether the object is an error envelope: present
+// when the object has a top-level "error" key with any value, or a top-level
+// "type" equal to "error". A non-JSON or non-object payload returns
+// (nil, false).
 func ParseSSEPayload(payload string) (map[string]any, bool) {
 	payload = strings.TrimSpace(payload)
 	if payload == "" {

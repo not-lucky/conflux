@@ -13,6 +13,7 @@ import (
 
 	"github.com/not-lucky/conflux/internal/auth"
 	"github.com/not-lucky/conflux/internal/forward"
+	"github.com/not-lucky/conflux/internal/metrics"
 	"github.com/not-lucky/conflux/internal/stream"
 	"github.com/not-lucky/conflux/internal/trace"
 )
@@ -37,27 +38,32 @@ func (s *Server) handleProxy(w http.ResponseWriter, r *http.Request) {
 	// 1. Client key extraction and auth.
 	ck := auth.ExtractKey(r.Header)
 	if !l.Validator.Validate(ck) {
-		s.Metrics.RecordError("", "UNAUTHORIZED")
+		s.Metrics.RecordRequest(metrics.GatewayProvider, "", http.StatusUnauthorized)
+		s.Metrics.RecordError(metrics.GatewayProvider, "UNAUTHORIZED")
 		writeError(w, http.StatusUnauthorized, "invalid_client_key", "missing or invalid client key")
 		return
 	}
 	// 2. Read and cap the body.
 	body, err := readBody(r)
 	if err != nil {
+		s.Metrics.RecordRequest(metrics.GatewayProvider, "", http.StatusBadRequest)
+		s.Metrics.RecordError(metrics.GatewayProvider, "CLIENT_ERROR")
 		writeError(w, http.StatusBadRequest, "bad_body", err.Error())
 		return
 	}
 	// 3. Extract the model.
 	modelName, _, err := extractModel(r, body)
 	if err != nil {
-		s.Metrics.RecordError("", "CLIENT_ERROR")
+		s.Metrics.RecordRequest(metrics.GatewayProvider, "", http.StatusBadRequest)
+		s.Metrics.RecordError(metrics.GatewayProvider, "CLIENT_ERROR")
 		writeError(w, http.StatusBadRequest, "bad_model", err.Error())
 		return
 	}
 	// 4. Route to the provider.
 	provName, ok := l.Registry.Match(modelName)
 	if !ok {
-		s.Metrics.RecordError("", "CLIENT_ERROR")
+		s.Metrics.RecordRequest(metrics.GatewayProvider, modelName, http.StatusNotFound)
+		s.Metrics.RecordError(metrics.GatewayProvider, "CLIENT_ERROR")
 		writeError(w, http.StatusNotFound, "model_not_found", fmt.Sprintf("no provider for model %q", modelName))
 		return
 	}
@@ -70,6 +76,7 @@ func (s *Server) handleProxy(w http.ResponseWriter, r *http.Request) {
 		rpm = l.Config.Defaults.RateLimitRPM
 	}
 	if rpm > 0 && !s.Limiter.Allow(ck, rpm) {
+		s.Metrics.RecordRequest(provName, modelName, http.StatusTooManyRequests)
 		s.Metrics.RecordError(provName, "CLIENT_RATE_LIMIT")
 		writeError(w, http.StatusTooManyRequests, "rate_limited", "per-key rate limit exceeded")
 		return
@@ -173,7 +180,8 @@ type errorFinish struct {
 
 // finishError unifies the two terminal-error finish paths: a forwarder error
 // (resp == nil) and a downstream Status==0 terminal response (resp != nil).
-// It records the per-category error metric, writes the error trace and meta
+// It records the downstream response (one per terminal outcome, status 502)
+// plus the per-category error metric, writes the error trace and meta
 // (stamping KeyNumber/Proxy/ProxyNumber/Attempt only when resp is non-nil),
 // and emits a 502 JSON error envelope. dur and the timestamp are computed
 // once and shared by WriteError and WriteMeta. Both the metric category and
@@ -185,11 +193,21 @@ func (s *Server) finishError(ef errorFinish) {
 
 	metricsCategory := "FORWARD_ERROR"
 	traceCategory := "UNKNOWN_PROVIDER"
+	model := ef.model
 	if ef.resp != nil {
 		metricsCategory = ef.resp.Category
 		traceCategory = ef.resp.Category
+		if ef.resp.Model != "" {
+			model = ef.resp.Model
+		}
 	}
 
+	// Record the terminal response and duration so conflux_requests_total,
+	// conflux_requests_by_provider/_by_model, and the duration histogram cover
+	// every downstream outcome, not only successes. The per-category counter
+	// below remains the per-attempt series.
+	s.Metrics.RecordRequest(ef.prov, model, http.StatusBadGateway)
+	s.Metrics.RecordDuration(ef.prov, float64(dur))
 	s.Metrics.RecordError(ef.prov, metricsCategory)
 	ei := trace.ErrorInfo{
 		Provider:   ef.prov,
@@ -331,11 +349,7 @@ func copyResponse(w http.ResponseWriter, r *http.Request, resp *forward.Response
 	if resp.Stream {
 		w.WriteHeader(resp.Status)
 		fw := flushWriter{w: w}
-		_ = stream.Pipe(r.Context(), resp.StreamReader, fw, nil,
-			stream.PipeOptions{
-				KeepaliveInterval: resp.StreamKeepalive,
-				IdleTimeout:       resp.StreamIdleTimeout,
-			}, nil)
+		_ = stream.Pipe(r.Context(), resp.StreamReader, fw, nil, nil)
 		if resp.StreamReader != nil {
 			resp.StreamReader.Close()
 		}

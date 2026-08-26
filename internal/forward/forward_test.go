@@ -9,7 +9,6 @@ import (
 	"strconv"
 	"strings"
 	"testing"
-	"time"
 )
 
 // fakeDoer scripts a sequence of responses and transport-errors per attempt.
@@ -36,7 +35,7 @@ func (d *fakeDoer) Do(ctx context.Context, req *UpstreamRequest) (*UpstreamRespo
 	r := d.script[d.idx]
 	d.idx++
 	if r.transportErr != "" {
-		return &UpstreamResponse{TransportErr: r.transportErr}, errors.New(r.transportErr)
+		return nil, errors.New(r.transportErr)
 	}
 	h := r.headers
 	if h == nil {
@@ -67,74 +66,87 @@ func newFakeProvider(name string) (*fakeProvider, *fakeHandle) {
 	fh := &fakeHandle{
 		name: name,
 		policy: ProviderPolicy{
-			Name:              name,
-			BaseURL:           "https://api.example.com/v1",
-			MaxAttempts:       3,
-			ActiveWindowSize:  3,
-			MaxStreamRetries:  3,
-			RequestTimeout:    5 * time.Second,
-			StreamIdleTimeout: 5 * time.Second,
-			KeepaliveInterval: 0,
-			RequestDeadline:   30 * time.Second,
+			Name:             name,
+			BaseURL:          "https://api.example.com/v1",
+			MaxAttempts:      3,
+			ActiveWindowSize: 3,
+			MaxStreamRetries: 3,
 		},
 	}
 	fh.ResetDefaults()
 	return &fakeProvider{handle: fh}, fh
 }
 
-// fakeHandle implements ProviderHandle for tests. Its exported func fields are
-// the method implementations, so tests can swap individual behaviors (e.g.
-// fh.BreakerOpenFn = func() bool { return true }) without rebuilding the
-// handle.
+// fakeHandle implements ProviderHandle for tests. Its callbacks are grouped
+// into the three focused ports (Keys, Proxy, Brk) plus the policy, so the
+// test surface mirrors the real contract instead of a flat bag of 12 funcs.
+// Each callback is the method implementation, so tests can swap an
+// individual behavior (e.g. fh.Brk.BreakerOpenFn = func() bool { return true })
+// without rebuilding the handle.
 type fakeHandle struct {
 	name    string
 	nextKey int
 	policy  ProviderPolicy
 
-	SelectFn             func() (Selection, error)
-	RecordSuccessFn      func(keyNumber int)
-	RecordErrorFn        func(keyNumber int) RecordResult
-	MarkExhaustedFn      func(keyNumber int)
+	Keys  KeySourceFns
+	Proxy ProxyResolverFns
+	Brk   BreakerFns
+}
+
+// KeySourceFns holds the KeySource port callbacks.
+type KeySourceFns struct {
+	SelectFn        func() (Selection, error)
+	RecordSuccessFn func(keyNumber int)
+	RecordErrorFn   func(keyNumber int) RecordResult
+	MarkExhaustedFn func(keyNumber int)
+}
+
+// ProxyResolverFns holds the ProxyResolver port callbacks.
+type ProxyResolverFns struct {
 	ResolveProxyFn       func(slotIndex, cycleCount int, sel Selection) ProxySelection
 	RecordProxyErrorFn   func(url string)
 	SetProxyLastErrorFn  func(url, msg string)
 	RecordProxySuccessFn func(url string)
-	BreakerOpenFn        func() bool
-	BreakerOn5xxFn       func() bool
-	BreakerOn2xxFn       func()
 }
 
-// ResetDefaults installs the no-op/default behavior for every func field,
-// so a test can override just the ones it cares about.
+// BreakerFns holds the Breaker port callbacks.
+type BreakerFns struct {
+	OpenFn  func() bool
+	On5xxFn func() bool
+	On2xxFn func()
+}
+
+// ResetDefaults installs the no-op/default behavior for every callback, so a
+// test can override just the ones it cares about.
 func (h *fakeHandle) ResetDefaults() {
-	h.SelectFn = h.selectKey
-	h.RecordSuccessFn = func(int) {}
-	h.RecordErrorFn = func(int) RecordResult { return RecordResult{} }
-	h.MarkExhaustedFn = func(int) {}
-	h.ResolveProxyFn = func(slot, cycle int, sel Selection) ProxySelection { return ProxySelection{Direct: true} }
-	h.RecordProxyErrorFn = func(string) {}
-	h.SetProxyLastErrorFn = func(string, string) {}
-	h.RecordProxySuccessFn = func(string) {}
-	h.BreakerOpenFn = func() bool { return false }
-	h.BreakerOn5xxFn = func() bool { return false }
-	h.BreakerOn2xxFn = func() {}
+	h.Keys.SelectFn = h.selectKey
+	h.Keys.RecordSuccessFn = func(int) {}
+	h.Keys.RecordErrorFn = func(int) RecordResult { return RecordResult{} }
+	h.Keys.MarkExhaustedFn = func(int) {}
+	h.Proxy.ResolveProxyFn = func(slot, cycle int, sel Selection) ProxySelection { return ProxySelection{Direct: true} }
+	h.Proxy.RecordProxyErrorFn = func(string) {}
+	h.Proxy.SetProxyLastErrorFn = func(string, string) {}
+	h.Proxy.RecordProxySuccessFn = func(string) {}
+	h.Brk.OpenFn = func() bool { return false }
+	h.Brk.On5xxFn = func() bool { return false }
+	h.Brk.On2xxFn = func() {}
 }
 
 func (h *fakeHandle) Policy() ProviderPolicy { return h.policy }
 
-func (h *fakeHandle) Select() (Selection, error)             { return h.SelectFn() }
-func (h *fakeHandle) RecordSuccess(keyNumber int)            { h.RecordSuccessFn(keyNumber) }
-func (h *fakeHandle) RecordError(keyNumber int) RecordResult { return h.RecordErrorFn(keyNumber) }
-func (h *fakeHandle) MarkExhausted(keyNumber int)            { h.MarkExhaustedFn(keyNumber) }
+func (h *fakeHandle) Select() (Selection, error)             { return h.Keys.SelectFn() }
+func (h *fakeHandle) RecordSuccess(keyNumber int)            { h.Keys.RecordSuccessFn(keyNumber) }
+func (h *fakeHandle) RecordError(keyNumber int) RecordResult { return h.Keys.RecordErrorFn(keyNumber) }
+func (h *fakeHandle) MarkExhausted(keyNumber int)            { h.Keys.MarkExhaustedFn(keyNumber) }
 func (h *fakeHandle) ResolveProxy(slotIndex, cycleCount int, sel Selection) ProxySelection {
-	return h.ResolveProxyFn(slotIndex, cycleCount, sel)
+	return h.Proxy.ResolveProxyFn(slotIndex, cycleCount, sel)
 }
-func (h *fakeHandle) RecordProxyError(url string)       { h.RecordProxyErrorFn(url) }
-func (h *fakeHandle) SetProxyLastError(url, msg string) { h.SetProxyLastErrorFn(url, msg) }
-func (h *fakeHandle) RecordProxySuccess(url string)     { h.RecordProxySuccessFn(url) }
-func (h *fakeHandle) BreakerOpen() bool                 { return h.BreakerOpenFn() }
-func (h *fakeHandle) BreakerOn5xx() bool                { return h.BreakerOn5xxFn() }
-func (h *fakeHandle) BreakerOn2xx()                     { h.BreakerOn2xxFn() }
+func (h *fakeHandle) RecordProxyError(url string)       { h.Proxy.RecordProxyErrorFn(url) }
+func (h *fakeHandle) SetProxyLastError(url, msg string) { h.Proxy.SetProxyLastErrorFn(url, msg) }
+func (h *fakeHandle) RecordProxySuccess(url string)     { h.Proxy.RecordProxySuccessFn(url) }
+func (h *fakeHandle) BreakerOpen() bool                 { return h.Brk.OpenFn() }
+func (h *fakeHandle) BreakerOn5xx() bool                { return h.Brk.On5xxFn() }
+func (h *fakeHandle) BreakerOn2xx()                     { h.Brk.On2xxFn() }
 
 func (h *fakeHandle) selectKey() (Selection, error) {
 	h.nextKey++
@@ -225,13 +237,13 @@ func TestForwardTransportErrorRetries(t *testing.T) {
 func TestForwardProxyLastErrorRecorded(t *testing.T) {
 	doer := &fakeDoer{script: []fakeResp{{transportErr: "dial tcp: connection refused"}, {status: 200, body: []byte(`{"ok":true}`)}}}
 	fp, fh := newFakeProvider("openai")
-	fh.ResolveProxyFn = func(slot, cycle int, sel Selection) ProxySelection {
+	fh.Proxy.ResolveProxyFn = func(slot, cycle int, sel Selection) ProxySelection {
 		return ProxySelection{URL: "http://proxy:8080", Number: 1}
 	}
 	var lastErrURL, lastErrMsg string
 	var proxyErrURL string
-	fh.RecordProxyErrorFn = func(url string) { proxyErrURL = url }
-	fh.SetProxyLastErrorFn = func(url, msg string) { lastErrURL = url; lastErrMsg = msg }
+	fh.Proxy.RecordProxyErrorFn = func(url string) { proxyErrURL = url }
+	fh.Proxy.SetProxyLastErrorFn = func(url, msg string) { lastErrURL = url; lastErrMsg = msg }
 	f := &Forwarder{Doer: doer, Providers: fp}
 	req := &Request{Method: "POST", Path: "/x", Body: []byte(`{"model":"gpt-4o"}`), Model: "gpt-4o", Provider: "openai", Headers: http.Header{}}
 	resp, _ := f.Do(context.Background(), req)
@@ -260,9 +272,9 @@ func TestSSEBreakerOpenForwardsErrorChunk(t *testing.T) {
 	}}
 	fp, fh := newFakeProvider("openai")
 	// Breaker is already open (tripped by a prior 5xx from another request).
-	fh.BreakerOpenFn = func() bool { return true }
+	fh.Brk.OpenFn = func() bool { return true }
 	var breaker5xxCalls int
-	fh.BreakerOn5xxFn = func() bool { breaker5xxCalls++; return true }
+	fh.Brk.On5xxFn = func() bool { breaker5xxCalls++; return true }
 	f := &Forwarder{Doer: doer, Providers: fp}
 	req := &Request{
 		Method:   "POST",
@@ -339,6 +351,88 @@ func TestSSEKeyRateLimitedThenCleanChunk(t *testing.T) {
 	if !bytes.Contains(out, []byte("hello")) {
 		t.Errorf("streamed body does not contain clean chunk: %s", out)
 	}
+}
+
+// TestSSEStreamingAttemptContextStaysLive verifies that the per-attempt context
+// remains alive across multiple streamed chunks rather than being cancelled
+// prematurely immediately after Doer.Do returns.
+func TestSSEStreamingAttemptContextStaysLive(t *testing.T) {
+	cadoer := &contextAwareDoer{}
+	fp, _ := newFakeProvider("openai")
+	f := &Forwarder{Doer: cadoer, Providers: fp}
+	req := &Request{
+		Method:   "POST",
+		Path:     "/x",
+		Body:     []byte(`{"model":"gpt-4o"}`),
+		Model:    "gpt-4o",
+		Provider: "openai",
+		Headers:  http.Header{"Accept": []string{"text/event-stream"}},
+	}
+	resp, err := f.Do(context.Background(), req)
+	if err != nil {
+		t.Fatalf("Do: %v", err)
+	}
+	if !resp.Stream {
+		t.Fatal("expected Stream=true")
+	}
+	out, err := io.ReadAll(resp.StreamReader)
+	if err != nil {
+		t.Fatalf("io.ReadAll on StreamReader failed: %v", err)
+	}
+	if !bytes.Contains(out, []byte("first ")) || !bytes.Contains(out, []byte("second")) {
+		t.Errorf("streamed output missing chunks: %s", out)
+	}
+	if err := resp.StreamReader.Close(); err != nil {
+		t.Fatalf("StreamReader.Close: %v", err)
+	}
+	if !cadoer.reader.closed {
+		t.Errorf("underlying stream reader was not closed")
+	}
+}
+
+type contextAwareDoer struct {
+	reader *contextCheckingReader
+}
+
+func (d *contextAwareDoer) Do(ctx context.Context, req *UpstreamRequest) (*UpstreamResponse, error) {
+	d.reader = &contextCheckingReader{
+		ctx: ctx,
+		chunks: [][]byte{
+			[]byte("data: {\"choices\": [{\"delta\": {\"content\": \"first \"}}]}\n\n"),
+			[]byte("data: {\"choices\": [{\"delta\": {\"content\": \"second\"}}]}\n\n"),
+		},
+	}
+	return &UpstreamResponse{
+		Status:  200,
+		Headers: http.Header{"Content-Type": []string{"text/event-stream"}},
+		Body:    d.reader,
+		IsSSE:   true,
+	}, nil
+}
+
+type contextCheckingReader struct {
+	ctx    context.Context
+	chunks [][]byte
+	idx    int
+	closed bool
+}
+
+func (r *contextCheckingReader) Read(p []byte) (int, error) {
+	if err := r.ctx.Err(); err != nil {
+		return 0, err
+	}
+	if r.idx >= len(r.chunks) {
+		return 0, io.EOF
+	}
+	chunk := r.chunks[r.idx]
+	r.idx++
+	n := copy(p, chunk)
+	return n, nil
+}
+
+func (r *contextCheckingReader) Close() error {
+	r.closed = true
+	return nil
 }
 
 func TestURLDedup(t *testing.T) {

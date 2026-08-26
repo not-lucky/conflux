@@ -79,9 +79,11 @@ func TestLRUEviction(t *testing.T) {
 	for i := 0; i < 5; i++ {
 		l.Allow(string(rune('A'+i)), 100) // re-uses buckets at zero
 	}
-	// No assertions on exact count here; the eviction path is exercised in
-	// TestLRUEvictionOverCap via a smaller-capacity limiter.
-	if l.Snapshot() < 0 {
-		t.Fatal("snapshot negative")
+	// After reuse, a fresh Allow on a tracked key should still admit (the
+	// bucket was reused, not leaked). This is the observable behavior the
+	// reuse path guarantees; exact bucket count is covered by
+	// TestLRUEvictionOverCap.
+	if !l.Allow("A", 100) {
+		t.Fatal("reused key A should be admitted")
 	}
 }

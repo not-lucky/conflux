@@ -12,6 +12,7 @@
 package dashboard
 
 import (
+	"crypto/subtle"
 	"encoding/json"
 	"fmt"
 	"net/http"
@@ -148,21 +149,7 @@ func (d *Dashboard) requireAuth(r *http.Request) bool {
 	if err != nil {
 		return false
 	}
-	return subtleEqual(c.Value, tok)
-}
-
-// subtleEqual does a constant-time-ish string comparison so a cookie mismatch
-// does not leak length info. (Not strictly necessary for an ops token, but
-// cheap and correct.)
-func subtleEqual(a, b string) bool {
-	if len(a) != len(b) {
-		return false
-	}
-	var v byte
-	for i := 0; i < len(a); i++ {
-		v |= a[i] ^ b[i]
-	}
-	return v == 0
+	return subtle.ConstantTimeCompare([]byte(c.Value), []byte(tok)) == 1
 }
 
 // authGate wraps a handler with admin-token auth. On failure it redirects a
@@ -230,7 +217,7 @@ func (d *Dashboard) handleLogin(w http.ResponseWriter, r *http.Request) {
 	}
 	_ = r.ParseForm()
 	got := strings.TrimSpace(r.FormValue("token"))
-	if !subtleEqual(got, tok) {
+	if subtle.ConstantTimeCompare([]byte(got), []byte(tok)) != 1 {
 		out, _ := d.r.renderLogin("Invalid admin token.")
 		w.Header().Set("Content-Type", "text/html; charset=utf-8")
 		w.WriteHeader(http.StatusUnauthorized)

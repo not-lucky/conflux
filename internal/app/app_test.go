@@ -15,12 +15,15 @@ import (
 	"github.com/not-lucky/conflux/internal/proxy"
 )
 
-// TestBuildSmoke loads the repository sample config and builds the runtime
-// to catch wiring mismatches between config, app, and the forwarder.
+// TestBuildSmoke loads the repository sample config (config.example.yaml,
+// the committed fixture) and builds the runtime to catch wiring mismatches
+// between config, app, and the forwarder. It deliberately does NOT read the
+// operator's gitignored config.yaml, which may be customized to different
+// providers; the sample fixture is the stable, version-controlled contract.
 func TestBuildSmoke(t *testing.T) {
-	cfg, err := config.Load("../../config.yaml")
+	cfg, err := config.Load("../../config.example.yaml")
 	if err != nil {
-		t.Fatalf("Load config.yaml: %v", err)
+		t.Fatalf("Load config.example.yaml: %v", err)
 	}
 	a, err := Build(cfg)
 	if err != nil {

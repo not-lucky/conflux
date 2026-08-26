@@ -24,12 +24,8 @@
 # fields, so a misconfigured provider cannot accidentally fall back at
 # request time.
 #
-# Note: defaults.<timeout fields> themselves default to the server.* timeouts.
-# So if you set server.request_timeout once, every provider inherits it
-# unless you override it per provider or in defaults.
-#
 # ---------------------------------------------------------------------------
-# Duration syntax (applies to every *_timeout / *_cooldown / *_interval field)
+# Duration syntax (applies to every *_cooldown / *_interval field)
 # ---------------------------------------------------------------------------
 #
 #   ^[0-9]+(ms|s|m|h)$
@@ -38,8 +34,8 @@
 #   OK:    30s   250ms   5m   1h   180s
 #   ERROR: 1h30m   1.5h   0s   30   30sec   1d
 # A zero/positive-zero value (e.g. "0s") is rejected as "duration must be >0".
-# Use "off" semantics by omitting the field where supported (e.g. rate limiting,
-# keepalive) or by choosing the relevant level (logging).
+# Use "off" semantics by omitting the field where supported (e.g. rate limiting)
+# or by choosing the relevant level (logging).
 # =============================================================================
 
 
@@ -49,29 +45,6 @@
 server:
   # Port to listen on. Range 1-65535. Default: 24118.
   port: 24118
-
-  # Per-attempt time-to-first-byte (TTFB) deadline: the upstream must send the
-  # response headers within this window or the attempt is aborted and
-  # classified as PROXY_NETWORK_ERROR (retryable, proxy-penalized, key-safe).
-  # Default: 60s.
-  request_timeout: 120s
-
-  # SSE idle watchdog: if no bytes flow between SSE lines for this long while
-  # streaming to the client, Conflux sends a terminal error chunk and closes.
-  # 0 disables it in spirit, but the field requires a positive duration; set
-  # a large value (e.g. 1h) to effectively disable. Default: 15s.
-  stream_idle_timeout: 20s
-
-  # SSE keepalive: emit a ": keepalive\n\n" comment line at this interval so
-  # downstream intermediaries (proxies, load balancers) do not time out idle
-  # streams. Default: 15s.
-  stream_keepalive_interval: 15s
-
-  # End-to-end deadline spanning ALL retry attempts for one client request.
-  # When it elapses, the in-flight attempt is cancelled and the best response
-  # so far (or a 502) is returned. Should be >= request_timeout and large
-  # enough to allow the configured retry budget. Default: 180s.
-  request_deadline: 600s
 
   # Inject X-Conflux-* diagnostic headers on responses (provider, model, key
   # number, proxy number, attempt count, terminal error). Disable in
@@ -207,20 +180,6 @@ defaults:
   # half-open (lets one request through; a 5xx re-trips, a success resets).
   # Default: 30s.
   upstream_5xx_cooldown: 30s
-
-  # Per-attempt TTFB (overrides server.request_timeout for this provider).
-  # Default: server.request_timeout.
-  request_timeout: 60s
-
-  # SSE idle watchdog (overrides server.stream_idle_timeout). Default: 15s.
-  stream_idle_timeout: 15s
-
-  # SSE keepalive interval (overrides server.stream_keepalive_interval).
-  # Default: 15s.
-  stream_keepalive_interval: 15s
-
-  # End-to-end deadline (overrides server.request_deadline). Default: 180s.
-  request_deadline: 180s
 
   # Per-CLIENT-key rate limit (requests per minute, 60s sliding window).
   # Must be >=1 when PRESENT. OMIT for UNLIMITED (explicit 0 is a startup
