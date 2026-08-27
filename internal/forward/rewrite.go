@@ -8,6 +8,7 @@ import (
 	"strings"
 
 	"github.com/not-lucky/conflux/internal/auth"
+	"github.com/not-lucky/conflux/internal/headermask"
 )
 
 // rewrite applies the URL construction, header substitution, hop-by-hop strip,
@@ -30,6 +31,15 @@ func (f *Forwarder) rewrite(req *Request, ph ProviderHandle, sel Selection, psel
 
 	providerKey := sel.Key
 	substituteHeaders(h, clientKey, providerKey)
+
+	// Apply header masking and agent spoofing/randomization.
+	// If the selected key has an inline profile override, pin that profile.
+	maskCfg := policy.HeaderMasking
+	if sel.Profile != "" {
+		maskCfg.Mode = "profile"
+		maskCfg.Profile = sel.Profile
+	}
+	headermask.Apply(h, maskCfg)
 
 	// URL construction.
 	upURL, err := buildUpstreamURL(policy.BaseURL, req.Path, req.RawQuery)

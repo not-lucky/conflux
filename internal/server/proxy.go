@@ -109,9 +109,12 @@ func (s *Server) handleProxy(w http.ResponseWriter, r *http.Request) {
 		Model:    modelName,
 		Provider: provName,
 	}
-	span.WriteRequest(reqInfo)
 	// 7. Forward.
 	resp, err := l.Forwarder.Do(r.Context(), freq)
+	if resp != nil && resp.UpstreamHeaders != nil {
+		reqInfo.Headers = resp.UpstreamHeaders
+	}
+	span.WriteRequest(reqInfo)
 	if err != nil {
 		s.finishError(errorFinish{
 			span:    span,
@@ -209,6 +212,9 @@ func (s *Server) finishError(ef errorFinish) {
 	s.Metrics.RecordRequest(ef.prov, model, http.StatusBadGateway)
 	s.Metrics.RecordDuration(ef.prov, float64(dur))
 	s.Metrics.RecordError(ef.prov, metricsCategory)
+	if ef.resp != nil && ef.resp.UpstreamHeaders != nil {
+		ef.reqInfo.Headers = ef.resp.UpstreamHeaders
+	}
 	ei := trace.ErrorInfo{
 		Provider:   ef.prov,
 		Model:      ef.model,
@@ -232,6 +238,9 @@ func (s *Server) finishError(ef errorFinish) {
 		meta.Proxy = ef.resp.ProxyURL
 		meta.ProxyNumber = ef.resp.ProxyNumber
 		meta.Attempt = ef.resp.AttemptCount
+		if ef.resp.UpstreamHeaders != nil {
+			ef.span.WriteUpstreamHeaders(ef.resp.UpstreamHeaders)
+		}
 	}
 	ef.span.WriteError(ei)
 	ef.span.WriteMeta(meta)
@@ -258,6 +267,9 @@ func (s *Server) finishSuccess(sf successFinish) {
 	dur := time.Since(sf.start).Milliseconds()
 	now := time.Now().UTC().Format(time.RFC3339)
 	sf.span.WriteResponseHeaders(sf.resp.Headers)
+	if sf.resp.UpstreamHeaders != nil {
+		sf.span.WriteUpstreamHeaders(sf.resp.UpstreamHeaders)
+	}
 	if sf.resp.Stream {
 		// Tee the stream through the tracer so the streamed bytes are captured
 		// into response.stream as they flow to the client. AppendStream no-ops

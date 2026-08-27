@@ -73,8 +73,16 @@ type rawPolicy struct {
 	Upstream5xxThreshold *int              `yaml:"upstream_5xx_threshold"`
 	Upstream5xxCooldown  *string           `yaml:"upstream_5xx_cooldown"`
 	RateLimitRPM         *int              `yaml:"rate_limit_rpm"`
-	Retry                *rawRetry         `yaml:"retry"`
-	FallbackModels       map[string]string `yaml:"fallback_models"`
+	Retry                *rawRetry          `yaml:"retry"`
+	FallbackModels       map[string]string  `yaml:"fallback_models"`
+	HeaderMasking        *rawHeaderMasking  `yaml:"header_masking"`
+}
+
+type rawHeaderMasking struct {
+	Mode          *string           `yaml:"mode"`
+	Profile       *string           `yaml:"profile"`
+	Profiles      []string          `yaml:"profiles"`
+	CustomHeaders map[string]string `yaml:"custom_headers"`
 }
 
 type rawDefaults struct {
@@ -102,8 +110,9 @@ type rawProvider struct {
 }
 
 type rawKey struct {
-	Key   string `yaml:"key"`
-	Proxy string `yaml:"proxy"`
+	Key     string `yaml:"key"`
+	Proxy   string `yaml:"proxy"`
+	Profile string `yaml:"profile"`
 }
 
 // rawProvProxy uses the canonical object form. A YAML array for `proxies`

@@ -201,6 +201,38 @@ defaults:
   # must be non-empty. Default: {} (no fallbacks).
   fallback_models: {}
 
+  # Header masking & agent spoofing: sanitize identifying client headers
+  # (User-Agent, X-Stainless-*, X-Cursor-*, Editor-*, etc.) and randomize or
+  # spoof authentic request headers from popular AI coding agents on Linux x64.
+  #
+  # Modes:
+  #   passthrough — default, leaves client headers untouched.
+  #   random      — randomly picks an authentic profile per request from `profiles`
+  #                 (or all built-in profiles if `profiles` is empty).
+  #   profile     — selects a specific profile (e.g. `cursor`, `claude-code`, etc.).
+  #   custom      — applies only `custom_headers` (with identifying headers stripped).
+  #
+  # Built-in profiles:
+  #   cursor, claude-code, cline, roo-code, windsurf, opencode, aider, continue,
+  #   zed, copilot, openai-python, openai-node, anthropic-python, anthropic-typescript
+  #
+  # Default: passthrough (off).
+  header_masking:
+    mode: passthrough
+    # profile: opencode
+    # profiles:
+    #   - cursor
+    #   - claude-code
+    #   - opencode
+    #   - cline
+    #   - roo-code
+    #   - windsurf
+    #   - aider
+    #   - zed
+    # custom_headers:
+    #   X-Custom-Env: production
+
+
 
 # -----------------------------------------------------------------------------
 # providers — a MAP keyed by provider name (order is preserved; the 1-based
@@ -226,9 +258,13 @@ providers:
       # Optional `proxy:` pins THIS key to a single proxy URL (validated as a
       # proxy URL). An inline proxy takes precedence over the provider pool and
       # the global pool; if it trips, the attempt falls to direct.
+      # Optional `profile:` pins THIS key to a specific agent header masking profile
+      # (e.g., "opencode", "cursor", "claude-code", "cline", "zed", "aider").
       - key: "sk-openai-000000000000000000000000000000000000000000000001"
+        profile: opencode
       - key: "sk-openai-000000000000000000000000000000000000000000000002"
         proxy: "http://proxy-c.example.com:8080"
+        profile: cursor
       - key: "sk-openai-000000000000000000000000000000000000000000000003"
 
     # >=1 entry. Three kinds:

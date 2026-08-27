@@ -63,6 +63,14 @@ type PolicyFields struct {
 	RateLimitRPM          int
 	RetryMaxAttempts      int
 	FallbackModels        map[string]string
+	HeaderMasking         HeaderMaskingConfig
+}
+
+type HeaderMaskingConfig struct {
+	Mode          string            // "passthrough", "random", "profile", "custom"
+	Profile       string            // specific profile when mode == "profile"
+	Profiles      []string          // profile pool for mode == "random" (empty = all built-in)
+	CustomHeaders map[string]string // static custom header overrides
 }
 
 type DefaultsConfig struct {
@@ -105,10 +113,11 @@ const (
 	ModelCatchAll
 )
 
-// Key is a provider key with an optional inline proxy override.
+// Key is a provider key with an optional inline proxy or profile override.
 type Key struct {
-	Value string
-	Proxy string // empty when there is no inline override
+	Value   string
+	Proxy   string // empty when there is no inline override
+	Profile string // optional inline profile override (e.g. "opencode", "cursor")
 }
 
 // ProviderProxyConfig is a provider-scoped proxy pool that overrides the

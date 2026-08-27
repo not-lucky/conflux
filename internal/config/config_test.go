@@ -518,3 +518,123 @@ providers:
 		t.Errorf("retry.max_attempts = %d (want inherited 4)", p.RetryMaxAttempts)
 	}
 }
+
+func TestParseHeaderMasking(t *testing.T) {
+	t.Run("default passthrough", func(t *testing.T) {
+		yaml := `
+auth: {client_keys: [sk-1]}
+providers:
+  p:
+    base_url: https://x.com
+    models: [m]
+    keys: [{key: k}]
+`
+		cfg, err := parse([]byte(yaml))
+		if err != nil {
+			t.Fatalf("parse: %v", err)
+		}
+		p, _ := cfg.ProviderByName("p")
+		if p.HeaderMasking.Mode != "passthrough" {
+			t.Errorf("expected default mode passthrough, got %q", p.HeaderMasking.Mode)
+		}
+	})
+
+	t.Run("defaults and provider override", func(t *testing.T) {
+		yaml := `
+auth: {client_keys: [sk-1]}
+defaults:
+  header_masking:
+    mode: random
+    profiles: [cursor, zed]
+providers:
+  p1:
+    base_url: https://x.com
+    models: [m1]
+    keys: [{key: k1}]
+  p2:
+    base_url: https://y.com
+    models: [m2]
+    keys: [{key: k2}]
+    header_masking:
+      mode: profile
+      profile: claude-code
+      custom_headers:
+        X-Custom: value
+`
+		cfg, err := parse([]byte(yaml))
+		if err != nil {
+			t.Fatalf("parse: %v", err)
+		}
+		p1, _ := cfg.ProviderByName("p1")
+		if p1.HeaderMasking.Mode != "random" || len(p1.HeaderMasking.Profiles) != 2 {
+			t.Errorf("p1 unexpected header_masking: %+v", p1.HeaderMasking)
+		}
+
+		p2, _ := cfg.ProviderByName("p2")
+		if p2.HeaderMasking.Mode != "profile" || p2.HeaderMasking.Profile != "claude-code" || p2.HeaderMasking.CustomHeaders["X-Custom"] != "value" {
+			t.Errorf("p2 unexpected header_masking: %+v", p2.HeaderMasking)
+		}
+	})
+
+	t.Run("invalid mode", func(t *testing.T) {
+		yaml := `
+auth: {client_keys: [sk-1]}
+defaults:
+  header_masking:
+    mode: invalid_mode
+providers:
+  p:
+    base_url: https://x.com
+    models: [m]
+    keys: [{key: k}]
+`
+		_, err := parse([]byte(yaml))
+		if err == nil {
+			t.Fatal("expected error for invalid header_masking mode")
+		}
+	})
+
+	t.Run("key bound profile", func(t *testing.T) {
+		yaml := `
+auth: {client_keys: [sk-1]}
+providers:
+  p:
+    base_url: https://x.com
+    models: [m]
+    keys:
+      - key: k1
+        profile: opencode
+      - key: k2
+        profile: cursor
+`
+		cfg, err := parse([]byte(yaml))
+		if err != nil {
+			t.Fatalf("unexpected error: %v", err)
+		}
+		p, _ := cfg.ProviderByName("p")
+		if p.Keys[0].Profile != "opencode" {
+			t.Errorf("k1 profile = %q, want opencode", p.Keys[0].Profile)
+		}
+		if p.Keys[1].Profile != "cursor" {
+			t.Errorf("k2 profile = %q, want cursor", p.Keys[1].Profile)
+		}
+	})
+
+	t.Run("key bound invalid profile", func(t *testing.T) {
+		yaml := `
+auth: {client_keys: [sk-1]}
+providers:
+  p:
+    base_url: https://x.com
+    models: [m]
+    keys:
+      - key: k1
+        profile: invalid_profile_name
+`
+		_, err := parse([]byte(yaml))
+		if err == nil {
+			t.Fatal("expected error for invalid key profile")
+		}
+	})
+}
+

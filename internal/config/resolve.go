@@ -4,6 +4,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/not-lucky/conflux/internal/headermask"
 	"gopkg.in/yaml.v3"
 )
 
@@ -209,6 +210,7 @@ func resolveDefaults(d *rawDefaults, server ServerConfig) (DefaultsConfig, error
 		MaxStreamRetries:     3,
 		Upstream5xxThreshold: 5,
 		Upstream5xxCooldown:  30 * time.Second,
+		HeaderMasking:        HeaderMaskingConfig{Mode: "passthrough"},
 	}}
 	if d == nil {
 		return out, nil
@@ -267,7 +269,68 @@ func applyPolicyFields(p *PolicyFields, field, ksField string, raw *rawPolicy) e
 		}
 		p.FallbackModels = raw.FallbackModels
 	}
+	if raw.HeaderMasking != nil {
+		hm, err := resolveHeaderMasking(raw.HeaderMasking, field+".header_masking", p.HeaderMasking)
+		if err != nil {
+			return err
+		}
+		p.HeaderMasking = hm
+	}
 	return nil
+}
+
+func resolveHeaderMasking(r *rawHeaderMasking, field string, seed HeaderMaskingConfig) (HeaderMaskingConfig, error) {
+	out := seed
+	if out.Mode == "" {
+		out.Mode = "passthrough"
+	}
+	if r == nil {
+		return out, nil
+	}
+	if r.Mode != nil {
+		mode := strings.ToLower(strings.TrimSpace(*r.Mode))
+		switch mode {
+		case "passthrough", "off", "none", "random", "randomize", "profile", "preset", "select", "fixed", "custom":
+			out.Mode = mode
+		default:
+			return HeaderMaskingConfig{}, wrapf(ErrProviderError, field+".mode", "invalid mode %q (must be passthrough, random, profile, or custom)", *r.Mode)
+		}
+	} else {
+		if r.Profile != nil && strings.TrimSpace(*r.Profile) != "" {
+			out.Mode = "profile"
+		} else if len(r.Profiles) > 0 {
+			out.Mode = "random"
+		} else if len(r.CustomHeaders) > 0 {
+			out.Mode = "custom"
+		}
+	}
+	if r.Profile != nil {
+		prof := strings.ToLower(strings.TrimSpace(*r.Profile))
+		if prof != "" && !headermask.IsValidProfile(prof) {
+			return HeaderMaskingConfig{}, wrapf(ErrProviderError, field+".profile", "unknown profile %q", *r.Profile)
+		}
+		out.Profile = prof
+	}
+	if r.Profiles != nil {
+		out.Profiles = nil
+		for _, p := range r.Profiles {
+			p = strings.ToLower(strings.TrimSpace(p))
+			if !headermask.IsValidProfile(p) {
+				return HeaderMaskingConfig{}, wrapf(ErrProviderError, field+".profiles", "unknown profile %q", p)
+			}
+			out.Profiles = append(out.Profiles, p)
+		}
+	}
+	if r.CustomHeaders != nil {
+		out.CustomHeaders = make(map[string]string)
+		for k, v := range r.CustomHeaders {
+			if strings.TrimSpace(k) == "" {
+				return HeaderMaskingConfig{}, wrapf(ErrProviderError, field+".custom_headers", "empty header key")
+			}
+			out.CustomHeaders[strings.TrimSpace(k)] = v
+		}
+	}
+	return out, nil
 }
 
 func resolveKeySelection(ks *rawKeySelection, field string) (KeySelection, error) {
@@ -370,6 +433,13 @@ func resolveProvider(p *rawProvider, def DefaultsConfig, server ServerConfig, gl
 			}
 			k.Proxy = strings.TrimSpace(rk.Proxy)
 		}
+		if strings.TrimSpace(rk.Profile) != "" {
+			prof := strings.ToLower(strings.TrimSpace(rk.Profile))
+			if !headermask.IsValidProfile(prof) {
+				return Provider{}, wrapf(ErrProviderError, "providers."+p.Name+".keys[].profile", "unknown profile %q", rk.Profile)
+			}
+			k.Profile = prof
+		}
 		keys = append(keys, k)
 	}
 
@@ -397,6 +467,7 @@ func resolveProvider(p *rawProvider, def DefaultsConfig, server ServerConfig, gl
 			RateLimitRPM:         def.RateLimitRPM,
 			RetryMaxAttempts:     def.RetryMaxAttempts,
 			FallbackModels:       def.FallbackModels,
+			HeaderMasking:        def.HeaderMasking,
 		},
 	}
 

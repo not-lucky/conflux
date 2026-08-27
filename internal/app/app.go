@@ -19,6 +19,7 @@ import (
 	"github.com/not-lucky/conflux/internal/clock"
 	"github.com/not-lucky/conflux/internal/config"
 	"github.com/not-lucky/conflux/internal/forward"
+	"github.com/not-lucky/conflux/internal/headermask"
 	"github.com/not-lucky/conflux/internal/keypool"
 	"github.com/not-lucky/conflux/internal/metrics"
 	"github.com/not-lucky/conflux/internal/model"
@@ -130,7 +131,7 @@ func buildLive(cfg *config.Config, priorState persist.State, store *persist.Stor
 	for _, p := range cfg.Providers {
 		keys := make([]keypool.Key, 0, len(p.Keys))
 		for _, k := range p.Keys {
-			keys = append(keys, keypool.Key{Value: k.Value, Proxy: k.Proxy})
+			keys = append(keys, keypool.Key{Value: k.Value, Proxy: k.Proxy, Profile: k.Profile})
 		}
 		pools[p.Name] = keypool.New(keypool.Spec{
 			Keys:                  keys,
@@ -495,6 +496,12 @@ func buildHandles(cfg *config.Config, pools map[string]*keypool.Pool, breakers m
 				ActiveWindowSize: aw,
 				MaxStreamRetries: p.MaxStreamRetries,
 				FallbackModels:   p.FallbackModels,
+				HeaderMasking: headermask.Config{
+					Mode:          p.HeaderMasking.Mode,
+					Profile:       p.HeaderMasking.Profile,
+					Profiles:      p.HeaderMasking.Profiles,
+					CustomHeaders: p.HeaderMasking.CustomHeaders,
+				},
 			},
 			saver: saver,
 		}
@@ -510,7 +517,7 @@ func (h *providerHandle) Select() (forward.Selection, error) {
 		return forward.Selection{}, err
 	}
 	return forward.Selection{
-		Key: sel.Key.Value, KeyNumber: sel.KeyNumber, SlotIndex: sel.SlotIndex, Proxy: sel.Key.Proxy, CycleCount: sel.CycleCount,
+		Key: sel.Key.Value, KeyNumber: sel.KeyNumber, SlotIndex: sel.SlotIndex, Proxy: sel.Key.Proxy, Profile: sel.Key.Profile, CycleCount: sel.CycleCount,
 	}, nil
 }
 

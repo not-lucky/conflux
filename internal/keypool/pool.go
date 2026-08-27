@@ -32,10 +32,11 @@ type Spec struct {
 	RetireOnExhaustion    bool
 }
 
-// Key is one provider key, with a value and an optional inline proxy.
+// Key is one provider key, with a value and optional inline proxy or profile.
 type Key struct {
-	Value string
-	Proxy string
+	Value   string
+	Proxy   string
+	Profile string
 }
 
 // Errors.
@@ -105,6 +106,7 @@ type Selection struct {
 	KeyNumber  int    // 1-based declaration index
 	SlotIndex  int    // 0-based slot index within the active window's healthy list
 	Proxy      string // inline proxy (keys[].proxy) carried from the selected key, or empty
+	Profile    string // inline profile (keys[].profile) carried from the selected key, or empty
 	CycleCount int    // per-provider round-robin cycle count, used by proxy rotation
 }
 
@@ -175,7 +177,7 @@ func (p *Pool) selectRoundRobin(healthy []int) (Selection, error) {
 	}
 	p.slotUse++
 	advance := p.slotUse >= rpk
-	sel := Selection{Key: k, KeyNumber: idx + 1, SlotIndex: p.cursor, Proxy: k.Proxy}
+	sel := Selection{Key: k, KeyNumber: idx + 1, SlotIndex: p.cursor, Proxy: k.Proxy, Profile: k.Profile}
 	if advance {
 		p.slotUse = 0
 		p.cursor++
@@ -209,7 +211,7 @@ func (p *Pool) selectSticky(healthy []int) (Selection, error) {
 	if slot < 0 {
 		slot = 0
 	}
-	return Selection{Key: p.spec.Keys[idx], KeyNumber: idx + 1, SlotIndex: slot, Proxy: p.spec.Keys[idx].Proxy, CycleCount: p.cycleCount}, nil
+	return Selection{Key: p.spec.Keys[idx], KeyNumber: idx + 1, SlotIndex: slot, Proxy: p.spec.Keys[idx].Proxy, Profile: p.spec.Keys[idx].Profile, CycleCount: p.cycleCount}, nil
 }
 
 // nextHealthyFrom returns the next healthy declaration index at or after

@@ -28,6 +28,7 @@ import (
 	"sync"
 
 	"github.com/not-lucky/conflux/internal/classify"
+	"github.com/not-lucky/conflux/internal/headermask"
 	"github.com/not-lucky/conflux/internal/stream"
 )
 
@@ -45,9 +46,10 @@ type Request struct {
 
 // Response is the finalized downstream response.
 type Response struct {
-	Status       int
-	Headers      http.Header // upstream headers after hop-by-hop strip
-	Body         []byte      // for JSON responses
+	Status          int
+	Headers         http.Header // upstream headers after hop-by-hop strip
+	UpstreamHeaders http.Header // request headers sent upstream on this attempt
+	Body            []byte      // for JSON responses
 	Stream       bool        // true for SSE, in which case Body is empty and the caller handles the stream
 	StreamReader io.ReadCloser
 	// Diagnostics for x-conflux-* headers. The server reads these and renders
@@ -125,6 +127,7 @@ type ProviderPolicy struct {
 	ActiveWindowSize int // used to compute the default
 	MaxStreamRetries int
 	FallbackModels   map[string]string
+	HeaderMasking    headermask.Config
 }
 
 // ProviderHandle is the per-provider runtime seam: it exposes the key pool,
@@ -177,6 +180,7 @@ type Selection struct {
 	KeyNumber  int
 	SlotIndex  int
 	Proxy      string // inline proxy (keys[].proxy) from the selected key, or empty
+	Profile    string // inline profile (keys[].profile) from the selected key, or empty
 	CycleCount int    // per-provider cycle count, used by proxy rotation
 }
 
@@ -250,6 +254,7 @@ func (f *Forwarder) Do(ctx context.Context, req *Request) (*Response, error) {
 	streamRetries := 0
 	var lastErr error
 	var lastCat category = UnknownError
+	var lastUpHeaders http.Header
 
 	for attempt := 1; attempt <= maxAttempts; attempt++ {
 		// Check context cancellation before each attempt.
@@ -260,7 +265,11 @@ func (f *Forwarder) Do(ctx context.Context, req *Request) (*Response, error) {
 		sel, err := ph.Select()
 		if err != nil {
 			// No healthy key in the active window returns 503.
-			return &Response{Provider: policy.Name, DownstreamError: ErrNoHealthyKey, Category: "KEY_EXHAUSTION"}, nil
+			masked := req.Headers.Clone()
+			stripHopByHop(masked)
+			masked.Del("X-Conflux-Client-Key")
+			headermask.Apply(masked, policy.HeaderMasking)
+			return &Response{Provider: policy.Name, DownstreamError: ErrNoHealthyKey, Category: "KEY_EXHAUSTION", UpstreamHeaders: masked}, nil
 		}
 		// Skip keys already tried. Penalized retries use a distinct key. A
 		// PROXY_NETWORK_ERROR retry reuses the same key, so it is not added to
@@ -278,6 +287,9 @@ func (f *Forwarder) Do(ctx context.Context, req *Request) (*Response, error) {
 			lastErr = rerr
 			continue
 		}
+		if upReq != nil && upReq.Headers != nil {
+			lastUpHeaders = upReq.Headers.Clone()
+		}
 		upReq.ViaProxy = psel.URL
 		upReq.SSE = isSSERequest(req.Headers)
 
@@ -294,6 +306,9 @@ func (f *Forwarder) Do(ctx context.Context, req *Request) (*Response, error) {
 		// (reclassified) result — the same attemptResult the JSON path uses.
 		res, chunk, sseReadErr, terminal := f.classifyAndPeek(upResp, err, psel.URL != "", policy)
 		if terminal != nil {
+			if terminal.UpstreamHeaders == nil {
+				terminal.UpstreamHeaders = lastUpHeaders
+			}
 			return terminal, nil
 		}
 
@@ -333,7 +348,7 @@ func (f *Forwarder) Do(ctx context.Context, req *Request) (*Response, error) {
 		// UpstreamOutage (UNIFIED).
 		if res.Category == UpstreamOutage {
 			if ph.BreakerOpen() {
-				resp := f.buildResponse(req, ph, sel, psel, effModel, rewrote, upResp, attempt, res, chunk, rcancel)
+				resp := f.buildResponse(req, upReq, ph, sel, psel, effModel, rewrote, upResp, attempt, res, chunk, rcancel)
 				if resp.Stream {
 					streamReturned = true
 				}
@@ -343,7 +358,7 @@ func (f *Forwarder) Do(ctx context.Context, req *Request) (*Response, error) {
 			lastErr = errors.New("upstream 5xx")
 			lastCat = res.Category
 			if f.sseRetryDecision(upResp, maxAttempts, attempt, policy.MaxStreamRetries, streamRetries) {
-				resp := f.buildResponse(req, ph, sel, psel, effModel, rewrote, upResp, attempt, res, chunk, rcancel)
+				resp := f.buildResponse(req, upReq, ph, sel, psel, effModel, rewrote, upResp, attempt, res, chunk, rcancel)
 				if resp.Stream {
 					streamReturned = true
 				}
@@ -356,7 +371,7 @@ func (f *Forwarder) Do(ctx context.Context, req *Request) (*Response, error) {
 		if res.Category == Success {
 			ph.BreakerOn2xx()
 			ph.RecordSuccess(sel.KeyNumber)
-			resp := f.buildResponse(req, ph, sel, psel, effModel, rewrote, upResp, attempt, res, chunk, rcancel)
+			resp := f.buildResponse(req, upReq, ph, sel, psel, effModel, rewrote, upResp, attempt, res, chunk, rcancel)
 			if resp.Stream {
 				streamReturned = true
 			}
@@ -366,21 +381,21 @@ func (f *Forwarder) Do(ctx context.Context, req *Request) (*Response, error) {
 		// Penalized / non-penalized (UNIFIED — the existing fall-through,
 		// now used by SSE too).
 		if applyConsequences(ph, sel, res, upResp, triedKeys, antiDrain) == consequenceForward {
-			resp := f.buildResponse(req, ph, sel, psel, effModel, rewrote, upResp, attempt, res, chunk, rcancel)
+			resp := f.buildResponse(req, upReq, ph, sel, psel, effModel, rewrote, upResp, attempt, res, chunk, rcancel)
 			if resp.Stream {
 				streamReturned = true
 			}
 			return resp, nil
 		}
 		if !res.Retryable {
-			resp := f.buildResponse(req, ph, sel, psel, effModel, rewrote, upResp, attempt, res, chunk, rcancel)
+			resp := f.buildResponse(req, upReq, ph, sel, psel, effModel, rewrote, upResp, attempt, res, chunk, rcancel)
 			if resp.Stream {
 				streamReturned = true
 			}
 			return resp, nil
 		}
 		if f.sseRetryDecision(upResp, maxAttempts, attempt, policy.MaxStreamRetries, streamRetries) {
-			resp := f.buildResponse(req, ph, sel, psel, effModel, rewrote, upResp, attempt, res, chunk, rcancel)
+			resp := f.buildResponse(req, upReq, ph, sel, psel, effModel, rewrote, upResp, attempt, res, chunk, rcancel)
 			if resp.Stream {
 				streamReturned = true
 			}
@@ -392,7 +407,14 @@ func (f *Forwarder) Do(ctx context.Context, req *Request) (*Response, error) {
 	}
 
 	// Retry budget exhausted.
-	return &Response{Provider: policy.Name, DownstreamError: lastErr, AttemptCount: maxAttempts, Category: lastCat.String()}, nil
+	if lastUpHeaders == nil {
+		masked := req.Headers.Clone()
+		stripHopByHop(masked)
+		masked.Del("X-Conflux-Client-Key")
+		headermask.Apply(masked, policy.HeaderMasking)
+		lastUpHeaders = masked
+	}
+	return &Response{Provider: policy.Name, DownstreamError: lastErr, AttemptCount: maxAttempts, Category: lastCat.String(), UpstreamHeaders: lastUpHeaders}, nil
 }
 
 // classifyAndPeek produces, for both JSON and SSE, the effective classification

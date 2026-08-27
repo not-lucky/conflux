@@ -376,6 +376,14 @@ func (s *Span) WriteResponseHeaders(h http.Header) {
 	s.writeJSON(filepath.Join(s.dir, "response_headers.json"), h)
 }
 
+// WriteUpstreamHeaders writes upstream_headers.json (redacted) to the trace dir.
+func (s *Span) WriteUpstreamHeaders(h http.Header) {
+	if s.dir == "" {
+		return
+	}
+	s.writeJSON(filepath.Join(s.dir, "upstream_headers.json"), redact.Headers(h))
+}
+
 // WriteResponseJSON writes response.json for a JSON response.
 func (s *Span) WriteResponseJSON(body []byte) {
 	if s.dir == "" {

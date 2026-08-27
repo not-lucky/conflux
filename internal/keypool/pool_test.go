@@ -243,6 +243,37 @@ func TestInlineProxyCarriedInSelection(t *testing.T) {
 	}
 }
 
+func TestInlineProfileCarriedInSelection(t *testing.T) {
+	twoKeys := []Key{
+		{Value: "A", Profile: "cursor"},
+		{Value: "B", Profile: "opencode"},
+	}
+	p := New(Spec{
+		Keys:           twoKeys,
+		Mode:           "round_robin",
+		RequestsPerKey: 1,
+		ActiveWindow:   2,
+		MaxErrors:      5,
+		Cooldown:       5 * time.Hour,
+	}, &fakeClock{t: time.Unix(1000, 0)})
+
+	s1, err := p.Select()
+	if err != nil {
+		t.Fatalf("select 1: %v", err)
+	}
+	if s1.Profile != "cursor" {
+		t.Errorf("select 1 Profile = %q, want cursor", s1.Profile)
+	}
+
+	s2, err := p.Select()
+	if err != nil {
+		t.Fatalf("select 2: %v", err)
+	}
+	if s2.Profile != "opencode" {
+		t.Errorf("select 2 Profile = %q, want opencode", s2.Profile)
+	}
+}
+
 // TestPoolReset verifies the dashboard's per-key Reset action clears
 // consecutive errors, exhaustion, and retirement.
 func TestPoolReset(t *testing.T) {

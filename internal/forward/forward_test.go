@@ -9,6 +9,8 @@ import (
 	"strconv"
 	"strings"
 	"testing"
+
+	"github.com/not-lucky/conflux/internal/headermask"
 )
 
 // fakeDoer scripts a sequence of responses and transport-errors per attempt.
@@ -509,3 +511,107 @@ func TestFallbackModelNoMatch(t *testing.T) {
 		t.Errorf("body changed: %s", out)
 	}
 }
+
+func TestHeaderMaskingRewrite(t *testing.T) {
+	t.Run("profile mode cursor", func(t *testing.T) {
+		fwd := &Forwarder{}
+		_, fh := newFakeProvider("fake")
+		fh.policy.HeaderMasking = headermask.Config{
+			Mode:    "profile",
+			Profile: "cursor",
+		}
+		req := &Request{
+			Provider: "fake",
+			Model:    "test",
+			Method:   "POST",
+			Path:     "/v1/chat/completions",
+			Headers: http.Header{
+				"User-Agent":           []string{"Bun/1.4.0"},
+				"X-Stainless-Lang":     []string{"python"},
+				"X-Conflux-Client-Key": []string{"sk-client"},
+				"Authorization":        []string{"Bearer sk-client"},
+				"Content-Type":         []string{"application/json"},
+			},
+			Body: []byte(`{"model":"test"}`),
+		}
+		upReq, _, _, err := fwd.rewrite(req, fh, Selection{Key: "sk-provider"}, ProxySelection{})
+		if err != nil {
+			t.Fatalf("rewrite err: %v", err)
+		}
+		if !strings.HasPrefix(upReq.Headers.Get("User-Agent"), "Cursor/") {
+			t.Errorf("expected Cursor User-Agent, got %q", upReq.Headers.Get("User-Agent"))
+		}
+		if upReq.Headers.Get("X-Stainless-Lang") != "" {
+			t.Errorf("expected X-Stainless-Lang stripped, got %q", upReq.Headers.Get("X-Stainless-Lang"))
+		}
+		if upReq.Headers.Get("x-cursor-client-version") == "" {
+			t.Errorf("expected x-cursor-client-version to be present")
+		}
+		if upReq.Headers.Get("Authorization") != "Bearer sk-provider" {
+			t.Errorf("expected Authorization: Bearer sk-provider, got %q", upReq.Headers.Get("Authorization"))
+		}
+	})
+
+	t.Run("random mode", func(t *testing.T) {
+		fwd := &Forwarder{}
+		_, fh := newFakeProvider("fake")
+		fh.policy.HeaderMasking = headermask.Config{
+			Mode:     "random",
+			Profiles: []string{"zed", "aider"},
+		}
+		req := &Request{
+			Provider: "fake",
+			Model:    "test",
+			Method:   "POST",
+			Path:     "/v1/chat/completions",
+			Headers: http.Header{
+				"User-Agent":           []string{"node-fetch/1.0"},
+				"X-Conflux-Client-Key": []string{"sk-client"},
+				"Authorization":        []string{"Bearer sk-client"},
+			},
+			Body: []byte(`{"model":"test"}`),
+		}
+		upReq, _, _, err := fwd.rewrite(req, fh, Selection{Key: "sk-provider"}, ProxySelection{})
+		if err != nil {
+			t.Fatalf("rewrite err: %v", err)
+		}
+		ua := upReq.Headers.Get("User-Agent")
+		if !strings.HasPrefix(ua, "Zed/") && !strings.HasPrefix(ua, "aider/") {
+			t.Errorf("expected Zed or aider User-Agent, got %q", ua)
+		}
+	})
+
+	t.Run("key inline profile override", func(t *testing.T) {
+		fwd := &Forwarder{}
+		_, fh := newFakeProvider("fake")
+		fh.policy.HeaderMasking = headermask.Config{
+			Mode:    "profile",
+			Profile: "cursor",
+		}
+		req := &Request{
+			Provider: "fake",
+			Model:    "test",
+			Method:   "POST",
+			Path:     "/v1/chat/completions",
+			Headers: http.Header{
+				"User-Agent":           []string{"Bun/1.4.0"},
+				"X-Conflux-Client-Key": []string{"sk-client"},
+				"Authorization":        []string{"Bearer sk-client"},
+			},
+			Body: []byte(`{"model":"test"}`),
+		}
+		// Key specifies Profile: "opencode"
+		upReq, _, _, err := fwd.rewrite(req, fh, Selection{Key: "sk-provider", Profile: "opencode"}, ProxySelection{})
+		if err != nil {
+			t.Fatalf("rewrite err: %v", err)
+		}
+		ua := upReq.Headers.Get("User-Agent")
+		if !strings.HasPrefix(ua, "opencode/") {
+			t.Errorf("expected opencode User-Agent from key override, got %q", ua)
+		}
+		if upReq.Headers.Get("x-opencode-version") == "" {
+			t.Errorf("expected x-opencode-version header from key profile override")
+		}
+	})
+}
+
